@@ -437,6 +437,60 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
 
   uiNoneZeroCountMbDc = pfQuantizationHadamard2x2 (pRes, pFF[0] << 1, pMF[0]>>1, aDct2x2, iChromaDc);
 
+  /* phasm-stego HOOK-C: chroma DC post-Hadamard-quant, dual-array writeback.
+   * Per the audit (openh264-hook-sites-intra.md §"Chroma DC hook"), this
+   * site sits immediately after pfQuantizationHadamard2x2 returns. The
+   * Hadamard quantizer writes the 4 post-quant DC entries to BOTH:
+   *   - aDct2x2[4]            (stack) — used below for dequant +
+   *                                       re-injection into pRes (line
+   *                                       ~480: pRes[0,16,32,48] = aDct2x2)
+   *                                       which then feeds IDCT in
+   *                                       OutputPMbWithoutConstructCsRsNoCopy
+   *   - iChromaDc = pMbCache->pDct->iChromaDc[iUV - 1] — read directly
+   *                                       by CABAC at svc_set_mb_syn_cabac.cpp
+   *                                       (~line 587 for Cb / 593 for Cr)
+   *
+   * The audit notes pfQuantizationHadamard2x2 writes BOTH simultaneously
+   * via ST64 inside the C reference (encode_mb_aux.cpp:272). Both arrays
+   * hold the same 4 levels at the call return, in Hadamard-domain order
+   * (which IS the scan order for chroma DC — no separate scan step).
+   * Helper phasm_apply_coeff_hooks_dual sanity-asserts level_a == level_b
+   * and writes the modified value to BOTH atomically.
+   *
+   * Position descriptor:
+   *   block_cat    = CHROMA_DC (3)
+   *   partition_idx = iUV - 1 (0=Cb, 1=Cr) — disambiguates plane
+   *   sub_block    = 0 (chroma DC has no sub-block; the 4 entries are
+   *                     the Hadamard-domain coefs of the 2x2 DC block)
+   *   coeff_idx    = 0..3 (Hadamard order)
+   *
+   * Contract: non-zero-in/non-zero-out preserves uiNoneZeroCountMbDc and
+   * the CBP-DC bit decision at line ~487 (pCurMb->uiCbp |= 0x10 if
+   * uiNoneZeroCountMbDc > 0). Sign-flips preserve |level| so the
+   * dequant + re-injection chain produces a symmetric perturbation in
+   * the recon. */
+  if (PhasmStegoGetEncPreEmit() != NULL) {
+    PhasmStegoPos phasm_pos_c;
+    phasm_pos_c.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_c.mb_x          = (uint16_t)pCurMb->iMbX;
+    phasm_pos_c.mb_y          = (uint16_t)pCurMb->iMbY;
+    phasm_pos_c.partition_idx = (uint8_t)(iUV - 1);
+    phasm_pos_c.sub_block     = 0;
+    phasm_pos_c.coeff_idx     = 0;
+    phasm_pos_c.block_cat     = 0;
+    phasm_pos_c.ref_idx       = 0xff;
+    phasm_pos_c.mv_component  = 0xff;
+    phasm_pos_c._reserved     = 0;
+    for (uint8_t phasm_c = 0; phasm_c < 4; ++phasm_c) {
+      phasm_apply_coeff_hooks_dual(&phasm_pos_c,
+                                   /*sub_block=*/0,
+                                   /*coeff_idx=*/phasm_c,
+                                   PHASM_BLOCK_CAT_CHROMA_DC,
+                                   /*level_a (aDct2x2/stack)=*/&aDct2x2[phasm_c],
+                                   /*level_b (iChromaDc/heap)=*/&iChromaDc[phasm_c]);
+    }
+  }
+
   pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax);
 
   for (j = 0; j < 4; j++) {
