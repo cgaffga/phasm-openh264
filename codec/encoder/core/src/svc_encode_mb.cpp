@@ -54,6 +54,20 @@ namespace WelsEnc {
 #define PHASM_BLOCK_CAT_LUMA_4x4    2
 #define PHASM_BLOCK_CAT_CHROMA_DC   3
 #define PHASM_BLOCK_CAT_CHROMA_AC   4
+
+/* H.264 zigzag scan permutations. Used by Stage 4 inter hooks (HOOK-F,
+ * HOOK-G) to map a scanned-order index back to the raster-order index
+ * for dual-array writeback. Each table is the (scanned_idx → raster_idx)
+ * mapping. Hard-coded to match the inline scan implementations in
+ * encode_mb_aux.cpp (WelsScan4x4DcAc_c lines 371-384, WelsScan4x4Ac_c
+ * lines 386-399). Sanity-asserted at the hook call site via the
+ * helper's level_a == level_b precondition. */
+static const uint8_t kPhasmLumaZigzag[16] = {
+  0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15
+};
+static const uint8_t kPhasmChromaAcZigzag[15] = {
+  1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15
+};
 void WelsDctMb (int16_t* pRes, uint8_t* pEncMb, int32_t iEncStride, uint8_t* pBestPred, PDctFunc pfDctFourT4) {
   pfDctFourT4 (pRes,       pEncMb,                      iEncStride, pBestPred,       16);
   pfDctFourT4 (pRes + 64,  pEncMb + 8,                  iEncStride, pBestPred + 8,   16);
@@ -324,6 +338,57 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   pBlock -= 256;
   pRes -= 256;
 
+  /* phasm-stego HOOK-F: P luma inter, post-quant POST-scan, dual-array
+   * writeback. Per the audit (openh264-hook-sites-inter-coeff.md), this
+   * site sits between the scan loop above and the JVT-O079 suppression
+   * decision below. At this point:
+   *   - pRes (= pMbCache->pCoeffLevel)        holds raster-order levels
+   *   - pBlock (= pMbCache->pDct->iLumaBlock) holds zigzag-scanned levels
+   * Both arrays must be kept consistent because:
+   *   - CABAC writer (WelsWriteMbResidualCabac) reads iLumaBlock zigzag
+   *   - IDCT recon (OutputPMbWithoutConstructCsRsNoCopy via
+   *     pfDequantizationFour4x4 + WelsIDctT4RecOnMb) reads pCoeffLevel
+   *
+   * Helper phasm_apply_coeff_hooks_dual does the dual-write atomically
+   * and sanity-asserts level_a == level_b (catches scan-index bugs).
+   *
+   * Note: per the audit, modifications must respect JVT-O079 floors
+   * (iSingleCtrMb < 6 → full MB zeroed; iSingleCtr8x8[i] < 4 → 8x8
+   * group zeroed). The phasm-side callback contract (non-zero in /
+   * non-zero out, magnitude preservation for suffix-LSB) keeps
+   * iSingleCtr8x8 contribution unchanged so suppression decisions
+   * survive. Sign-flips preserve |level| so aMax stays stable too.
+   *
+   * iSingleCtrMb is already computed above and stable for our
+   * non-zero-preserving hook. Suppression below runs against the
+   * pre-hook count, which is fine because we don't change zero-ness. */
+  if (PhasmStegoGetEncPreEmit() != NULL) {
+    PhasmStegoPos phasm_pos_f;
+    phasm_pos_f.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_f.mb_x          = (uint16_t)pCurMb->iMbX;
+    phasm_pos_f.mb_y          = (uint16_t)pCurMb->iMbY;
+    phasm_pos_f.partition_idx = 0;
+    phasm_pos_f.sub_block     = 0;
+    phasm_pos_f.coeff_idx     = 0;
+    phasm_pos_f.block_cat     = 0;
+    phasm_pos_f.ref_idx       = 0xff;
+    phasm_pos_f.mv_component  = 0xff;
+    phasm_pos_f._reserved     = 0;
+    for (uint8_t phasm_sb = 0; phasm_sb < 16; ++phasm_sb) {
+      int16_t* phasm_pres   = pRes   + (int32_t)phasm_sb * 16;
+      int16_t* phasm_pblock = pBlock + (int32_t)phasm_sb * 16;
+      for (uint8_t phasm_s = 0; phasm_s < 16; ++phasm_s) {
+        uint8_t phasm_r = kPhasmLumaZigzag[phasm_s];
+        phasm_apply_coeff_hooks_dual(&phasm_pos_f,
+                                     /*sub_block=*/phasm_sb,
+                                     /*coeff_idx=*/phasm_s,
+                                     PHASM_BLOCK_CAT_LUMA_4x4,
+                                     /*level_a (raster)=*/&phasm_pres[phasm_r],
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]);
+      }
+    }
+  }
+
   memset (pCurMb->pNonZeroCount, 0, 16);
 
 
@@ -391,6 +456,64 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
     pBlock += 16;
   }
   pRes -= 64;
+
+  /* phasm-stego HOOK-G: chroma AC inter (and intra by inheritance — Stage 5
+   * will validate the intra side from the same site), post-quant POST-scan,
+   * dual-array writeback. Per the audit (openh264-hook-sites-inter-coeff.md
+   * §"Hook insertion point — chroma"), this site sits between the AC scan
+   * j-loop above (which writes both pRes raster and pBlock zigzag-AC) and
+   * the JVT-O079 chroma suppression test below (iSingleCtr8x8 < 7).
+   *
+   * At this point:
+   *   - pRes points at chroma plane base (pCoeffLevel+256 for Cb, +320 Cr)
+   *   - pBlock has advanced 64 (4 blocks * 16 entries); the iChromaBlock
+   *     base for this plane is pMbCache->pDct->iChromaBlock[(iUV-1)<<2].
+   *
+   * Chroma AC zigzag scan (WelsScan4x4Ac_c) skips raster idx 0 (the DC
+   * slot, which is overwritten by Hadamard-DC dequant re-injection at
+   * lines 307-310). The 15 AC positions map scanned 0..14 → raster 1..15
+   * via kPhasmChromaAcZigzag. pBlock[15] is hard-zeroed by the scan; we
+   * don't hook scanned_idx=15.
+   *
+   * Position descriptor:
+   *   block_cat    = CHROMA_AC (4)
+   *   partition_idx = iUV-1 (0=Cb, 1=Cr) — disambiguates plane for the
+   *                   phasm-side callback
+   *   sub_block    = block_idx_within_plane (0..3)
+   *   coeff_idx    = scanned_idx (0..14)
+   *
+   * The helper enforces non-zero-in/non-zero-out, so sign-flips and
+   * suffix-LSB on |level|>=15 preserve iSingleCtr8x8 contribution. JVT
+   * suppression decision below uses the pre-hook count which stays
+   * stable for our contract. Chroma DC is a separate path
+   * (HOOK-C, Stage 5) and is unaffected by this hook. */
+  if (PhasmStegoGetEncPreEmit() != NULL) {
+    PhasmStegoPos phasm_pos_g;
+    phasm_pos_g.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_g.mb_x          = (uint16_t)pCurMb->iMbX;
+    phasm_pos_g.mb_y          = (uint16_t)pCurMb->iMbY;
+    phasm_pos_g.partition_idx = (uint8_t)(iUV - 1);
+    phasm_pos_g.sub_block     = 0;
+    phasm_pos_g.coeff_idx     = 0;
+    phasm_pos_g.block_cat     = 0;
+    phasm_pos_g.ref_idx       = 0xff;
+    phasm_pos_g.mv_component  = 0xff;
+    phasm_pos_g._reserved     = 0;
+    int16_t* phasm_pblock_base = pMbCache->pDct->iChromaBlock[(iUV - 1) << 2];
+    for (uint8_t phasm_sb = 0; phasm_sb < 4; ++phasm_sb) {
+      int16_t* phasm_pres   = pRes              + (int32_t)phasm_sb * 16;
+      int16_t* phasm_pblock = phasm_pblock_base + (int32_t)phasm_sb * 16;
+      for (uint8_t phasm_s = 0; phasm_s < 15; ++phasm_s) {
+        uint8_t phasm_r = kPhasmChromaAcZigzag[phasm_s];
+        phasm_apply_coeff_hooks_dual(&phasm_pos_g,
+                                     /*sub_block=*/phasm_sb,
+                                     /*coeff_idx=*/phasm_s,
+                                     PHASM_BLOCK_CAT_CHROMA_AC,
+                                     /*level_a (raster)=*/&phasm_pres[phasm_r],
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]);
+      }
+    }
+  }
 
   if (iSingleCtr8x8 < 7) { //from JVT-O079
     pfSetMemZeroSize64 (pRes, 128); // confirmed_safe_unsafe_usage
