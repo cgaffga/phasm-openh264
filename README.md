@@ -1,10 +1,185 @@
-OpenH264
-========
-OpenH264 is a codec library which supports H.264 encoding and decoding. It is suitable for use in real time applications such as WebRTC. See http://www.openh264.org/ for more details.
+# phasm-openh264 — OpenH264 fork with steganography hooks
 
-Encoder Features
-----------------
-- Constrained Baseline Profile up to Level 5.2 (Max frame size is 36864 macro-blocks)
+This is a fork of Cisco's [OpenH264](http://www.openh264.org/) v2.6.0 with
+a custom C ABI surface (`wels_stego.h`) that lets external callers
+override coefficient and motion-vector bits during H.264 encoding +
+read them back during decoding.
+
+The fork exists to power H.264 video steganography in
+[phasm.app](https://phasm.app) — a steganography app that hides
+encrypted text messages in JPEG photos and (with this fork) MP4
+videos. The unmodified upstream encoder + decoder are preserved; the
+stego hooks are additive and inert unless callbacks are registered.
+
+If you're looking for the upstream codec, go to
+[github.com/cisco/openh264](https://github.com/cisco/openh264) — this
+fork is not a general-purpose codec replacement.
+
+## What this fork adds
+
+A public C ABI at [`codec/api/wels/wels_stego.h`](codec/api/wels/wels_stego.h)
+with two entry points:
+
+```c
+void WelsRegisterPhasmStegoCallbacks(
+    const PhasmStegoCallbacks* cbs,
+    void* user_data);
+
+void WelsStegoSetFrameNum(uint32_t frame_num);
+```
+
+The callbacks fire from 13 instrumented sites across the encoder
+(`codec/encoder/core/src/svc_encode_mb.cpp` for intra + inter
+coefficients, `codec/encoder/core/src/svc_base_layer_md.cpp` for
+motion-vector differences) and one site in the decoder (post-read on
+the bypass-bin fast path).
+
+Hook complement:
+
+| Hook ID  | Mode                          | File                       |
+|----------|-------------------------------|-----------------------------|
+| A        | I_16x16 luma DC               | `svc_encode_mb.cpp`         |
+| B        | I_16x16 luma AC               | `svc_encode_mb.cpp`         |
+| C        | Chroma DC (2x2 Hadamard, ST64)| `svc_encode_mb.cpp`         |
+| E        | I_4x4 luma intra-MB cascade   | `svc_encode_mb.cpp`         |
+| F        | P luma inter (dual-array)     | `svc_encode_mb.cpp`         |
+| G        | P chroma inter (dual-array)   | `svc_encode_mb.cpp`         |
+| H1       | P_16x16 MVD                   | `svc_base_layer_md.cpp`     |
+| H2       | P_16x8 MVD (×2 partitions)    | `svc_base_layer_md.cpp`     |
+| H3       | P_8x16 MVD (×2 partitions)    | `svc_base_layer_md.cpp`     |
+| H4       | P_8x8 SUB_MB_TYPE_8x8 (×4)    | `svc_base_layer_md.cpp`     |
+| H5/H6/H7 | P_8x8 SUB_4x4/8x4/4x8 (dead*) | `svc_base_layer_md.cpp`     |
+
+(*H5/H6/H7 are wired but unreachable in stock v2.6.0:
+`WelsMdInterFinePartitionVaa` pins to `SUB_MB_TYPE_8x8`.)
+
+Each fire passes a 16-byte `PhasmStegoPos` descriptor identifying the
+MB, partition, sub-block, and coefficient (or MV component). The
+callback returns the new bit value; helper code in
+`codec/encoder/core/src/wels_stego.cpp` enforces a non-zero-in /
+non-zero-out contract, handles JVT-O079 zero-out floor protection,
+performs inverse-zigzag dual-array writeback for inter coefficients,
+and refuses MVD overrides that would collide with `PredSkipMv` (which
+would silently demote the MB to Skip and drop the steganographic
+bits).
+
+Without registered callbacks the entire surface compiles to a single
+predictable branch per hook site and has zero observable effect on
+the bitstream.
+
+## Branch + tag layout
+
+- **`master`** — read-only mirror of upstream Cisco master.
+- **`phasm-stego`** — production branch with the stego hooks applied.
+  Pinned to upstream v2.6.0 baseline.
+- **`phasm-stego-v0.1.0`** — first stable tag of the hook surface
+  (commit `5d657c83`, 2026-05-11). API frozen at this revision.
+
+## Building
+
+Identical to upstream OpenH264 for the codec proper. To build with
+the stego hooks compiled in:
+
+```sh
+git clone --branch phasm-stego https://github.com/cgaffga/phasm-openh264.git
+cd phasm-openh264
+meson setup _build
+ninja -C _build
+```
+
+Run the test suite:
+
+```sh
+meson test -C _build
+```
+
+You should see 5/5 OpenH264 lib suites green plus 30 phasm helper
+gtests passing.
+
+The `wels_stego.h` header lives at `codec/api/wels/wels_stego.h` and
+gets exported alongside the standard OpenH264 public API (`codec_api.h`,
+`codec_app_def.h`, etc.).
+
+For instructions on building the upstream codec for Windows / macOS /
+Linux / Android / iOS, NASM dependencies, and platform-specific
+caveats, see the
+[upstream OpenH264 README](https://github.com/cisco/openh264#building-the-library)
+— our fork is binary-compatible at the build level.
+
+## Continuous integration
+
+`.github/workflows/phasm-stego-ci.yml` runs every push to the
+`phasm-stego` branch on Ubuntu + macOS-latest. The workflow runs the
+full meson test suite plus an inline C++ determinism gate over a
+synthetic 320x240 fixture.
+
+**No binary artifacts are produced or uploaded by CI.** Patent
+licensing for H.264 encoders falls under the Via LA AVC pool — see
+the "Patent licensing" section below.
+
+## Patent licensing
+
+H.264 / AVC is covered by the Via LA AVC patent pool. Cisco's
+upstream OpenH264 is itself licensed under [Cisco's OpenH264
+license](https://www.openh264.org/BINARY_LICENSE.txt) for Cisco-built
+binaries that qualify for the Cisco-provided patent shield. **This
+fork does not inherit the binary patent shield** because we
+distribute source and the user builds locally — the shield only
+applies to Cisco-distributed binaries downloaded over HTTPS.
+
+Anyone shipping this fork as part of an end-user product should:
+1. Self-evaluate AVC pool licensing obligations against their
+   distribution model and unit volume.
+2. Not redistribute pre-built binaries of this fork without
+   independent legal review.
+3. Note the free-tier coverage threshold (per Via LA's published
+   policy as of 2026 — historically <100k units/year per licensee
+   has been at zero cost).
+
+This fork is consumed by [phasm.app](https://phasm.app) under that
+self-evaluation. Phasm is open-source (the consumer crate is GPL-3.0)
+and the user-facing CLI is built locally from source for users
+wanting H.264 stego — there are no Cisco-style binary downloads of
+phasm CLI containing the H.264 encoder.
+
+## License
+
+This fork inherits the upstream [BSD-2-Clause license](LICENSE) from
+Cisco's OpenH264. The phasm-stego additions
+(`codec/api/wels/wels_stego.h`,
+`codec/encoder/core/src/wels_stego.cpp`,
+`codec/encoder/core/inc/wels_stego_internal.h`, and the 13 hook
+insertions in the existing encoder TUs) are released under the same
+BSD-2-Clause license with explicit SPDX headers.
+
+The phasm consumer code that calls into this fork lives in a separate
+repository ([github.com/cgaffga/phasm](https://github.com/cgaffga/phasm))
+and is licensed GPL-3.0. Both licenses are compatible for distribution
+under the GPL-3.0 source distribution.
+
+## Cross-references
+
+- Phasm consumer repo: [cgaffga/phasm](https://github.com/cgaffga/phasm)
+- Upstream Cisco OpenH264: [cisco/openh264](https://github.com/cisco/openh264)
+- phasm.app project site: [phasm.app](https://phasm.app)
+- Design documents (in consumer repo):
+    - `docs/design/video/h264/openh264-hook-sites.md` (umbrella + Phase A.5 ship status)
+    - `docs/design/video/h264/openh264-hook-sites-intra.md`
+    - `docs/design/video/h264/openh264-hook-sites-inter-coeff.md`
+    - `docs/design/video/h264/openh264-hook-sites-mvd.md`
+    - `docs/design/video/h264/openh264-adaptation.md` (engineering notebook)
+
+## Upstream OpenH264 details
+
+Reproduced from the original upstream README for convenience:
+
+OpenH264 is a codec library which supports H.264 encoding and decoding.
+It is suitable for use in real time applications such as WebRTC.
+See <http://www.openh264.org/> for more details.
+
+### Encoder Features
+
+- Constrained Baseline Profile up to Level 5.2 (max frame size 36864 macroblocks)
 - Arbitrary resolution, not constrained to multiples of 16x16
 - Rate control with adaptive quantization, or constant quantization
 - Slice options: 1 slice per frame, N slices per frame, N macroblocks per slice, or N bytes per slice
@@ -22,176 +197,36 @@ Encoder Features
 - Annex B byte stream output
 - YUV 4:2:0 planar input
 
-Decoder Features
-----------------
-- Constrained Baseline Profile up to Level 5.2 (Max frame size is 36864 macro-blocks)
-- Arbitrary resolution, not constrained to multiples of 16x16
+### Decoder Features
+
+- Constrained Baseline Profile up to Level 5.2
+- Arbitrary resolution
 - Single thread for all slices
-- Long Term Reference (LTR) frames
-- Memory Management Control Operation (MMCO)
-- Reference picture list modification
-- Multiple reference frames when specified in Sequence Parameter Set (SPS)
+- Long Term Reference (LTR) frames + MMCO + reference picture list modification
+- Multiple reference frames when specified in SPS
 - Annex B byte stream input
 - YUV 4:2:0 planar output
 
-OS Support
-----------
-- Windows 64-bit and 32-bit
-- Mac OS X 64-bit and 32-bit
-- Mac OS X ARM64
-- Linux 64-bit and 32-bit
-- Android 64-bit and 32-bit
-- iOS 64-bit and 32-bit
-- Windows Phone 32-bit
+### Platform support
 
-Architectures verified to be working
-----------
-- ppc64el
+- Windows / macOS / Linux / Android / iOS (32-bit + 64-bit)
+- macOS ARM64
+- Verified on x86 (MMX/SSE), ARMv7 (NEON), AArch64 (NEON), and C/C++ fallback architectures
+- Known build target: ppc64el
 
-Processor Support
------------------
-- Intel x86 optionally with MMX/SSE (no AVX yet, help is welcome)
-- ARMv7 optionally with NEON, AArch64 optionally with NEON
-- Any architecture using C/C++ fallback functions
+For platform-specific build commands (Android NDK, iOS xcodebuild,
+Linux cross-compile, Windows AutoBuildForWindows.bat), follow the
+upstream README at <https://github.com/cisco/openh264>.
 
-Building the Library
---------------------
-NASM needed to be installed for assembly code: workable version 2.10.06 or above, NASM can be downloaded from http://www.nasm.us/.
-For Mac OSX 64-bit NASM needed to be below version 2.11.08 as NASM 2.11.08 will introduce error when using RIP-relative addresses in Mac OSX 64-bit
+### Known upstream issues
 
-To build the arm assembly for Windows Phone, gas-preprocessor is required. It can be downloaded from git://git.libav.org/gas-preprocessor.git
+See the upstream issue tracker at
+<https://github.com/cisco/openh264/issues>. Notably:
 
-For Android Builds
-------------------
-To build for android platform, You need to install android sdk and ndk. You also need to export `**ANDROID_SDK**/tools` to PATH. On Linux, this can be done by
-
-    export PATH=**ANDROID_SDK**/tools:$PATH
-
-The codec and demo can be built by
-
-    make OS=android NDKROOT=**ANDROID_NDK** TARGET=**ANDROID_TARGET**
-
-Valid `**ANDROID_TARGET**` can be found in `**ANDROID_SDK**/platforms`, such as `android-12`.
-You can also set `ARCH`, `NDKLEVEL` according to your device and NDK version.
-`ARCH` specifies the architecture of android device. Currently `arm`, `arm64`, `x86` and `x86_64` are supported, the default is `arm`. (`mips` and `mips64` can also be used, but there's no specific optimization for those architectures.)
-`NDKLEVEL` specifies android api level, the default is 12. Available possibilities can be found in `**ANDROID_NDK**/platforms`, such as `android-21` (strip away the `android-` prefix).
-
-By default these commands build for the `armeabi-v7a` ABI. To build for the other android
-ABIs, add `ARCH=arm64`, `ARCH=x86`, `ARCH=x86_64`, `ARCH=mips` or `ARCH=mips64`.
-To build for the older `armeabi` ABI (which has armv5te as baseline), add `APP_ABI=armeabi` (`ARCH=arm` is implicit).
-To build for 64-bit ABI, such as `arm64`, explicitly set `NDKLEVEL` to 21 or higher.
-
-For iOS Builds
---------------
-You can build the libraries and demo applications using xcode project files
-located in `codec/build/iOS/dec` and `codec/build/iOS/enc`.
-
-You can also build the libraries (but not the demo applications) using the
-make based build system from the command line. Build with
-
-    make OS=ios ARCH=**ARCH**
-
-Valid values for `**ARCH**` are the normal iOS architecture names such as
-`armv7`, `armv7s`, `arm64`, and `i386` and `x86_64` for the simulator.
-Another settable iOS specific parameter
-is `SDK_MIN`, specifying the minimum deployment target for the built library.
-For other details on building using make on the command line, see
-'For All Platforms' below.
-
-For Linux Builds
---------------
-
-You can build the libraries (but not the demo applications) using the
-make based build system from the command line. Build with
-
-    make OS=linux ARCH=**ARCH**
-
- You can set `ARCH` according to your linux device .
-`ARCH` specifies the architecture of the device. Currently `arm`, `arm64`, `x86` and `x86_64` are supported   
-
- NOTICE:
- 	If your computer is x86 architecture, for build the libnary which be used on arm/aarch64 machine, you may need to use cross-compiler, for example:
- 		make OS=linux CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ ARCH=arm64
-   		 or
-    	make OS=linux CC=arm-linux-gnueabi-gcc CXX=arm-linux-gnueabi-g++ ARCH=arm
-
-
-For Windows Builds
-------------------
-
-"make" must be installed. It is recommended to install the Cygwin and "make" must be selected to be included in the installation. After the installation, please add the Cygwin bin path to your PATH.
-
-openh264/build/AutoBuildForWindows.bat is provided to help compile the libraries on Windows platform.  
-Usage of the .bat script:  
-
-    `AutoBuildForWindows.bat Win32-Release-ASM` for x86 Release build  
-    `AutoBuildForWindows.bat Win64-Release-ASM` for x86_64 Release build  
-    `AutoBuildForWindows.bat ARM64-Release-ASM` for arm64 release build  
-for more usage, please refer to the .bat script help.  
-
-For All Platforms
--------------------
-
-Using make
-----------
-
-From the main project directory:
-- `make` for automatically detecting architecture and building accordingly
-- `make ARCH=i386` for x86 32-bit builds
-- `make ARCH=x86_64` for x86 64-bit builds
-- `make ARCH=arm64` for arm64 Mac 64-bit builds
-- `make V=No` for a silent build (not showing the actual compiler commands)
-- `make DEBUGSYMBOLS=True` for two libraries, one is normal libraries, another one is removed the debugging symbol table entries (those created by the -g option)
-
-The command line programs `h264enc` and `h264dec` will appear in the main project directory.
-
-A shell script to run the command-line apps is in `testbin/CmdLineExample.sh`
-
-Usage information can be found in `testbin/CmdLineReadMe`
-
-Using meson
------------
-
-Meson build definitions have been added, and are known to work on Linux
-and Windows, for x86 and x86 64-bit.
-
-See <http://mesonbuild.com/Installing.html> for instructions on how to
-install meson, then:
-
-``` shell
-meson setup builddir
-ninja -C builddir
-```
-
-Run the tests with:
-
-``` shell
-meson test -C builddir -v
-```
-
-Install with:
-
-``` shell
-ninja -C builddir install
-```
-
-Using the Source
-----------------
-- `codec` - encoder, decoder, console (test app), build (makefile, vcproj)
-- `build` - scripts for Makefile build system
-- `test` - GTest unittest files
-- `testbin` - autobuild scripts, test app config files
-- `res` - yuv and bitstream test files
-
-Known Issues
-------------
-See the issue tracker on https://github.com/cisco/openh264/issues
 - Encoder errors when resolution exceeds 3840x2160
 - Encoder errors when compressed frame size exceeds half uncompressed size
 - Decoder errors when compressed frame size exceeds 1MB
-- Encoder RC requires frame skipping to be enabled to hit the target bitrate,
-  if frame skipping is disabled the target bitrate may be exceeded
+- Encoder RC requires frame skipping to be enabled to hit the target bitrate
 
-License
--------
-BSD, see `LICENSE` file for details.
+None of these are introduced by this fork; they apply equally to
+upstream Cisco OpenH264.
