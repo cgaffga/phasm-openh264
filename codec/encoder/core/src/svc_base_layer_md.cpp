@@ -44,6 +44,7 @@
 #include "encoder.h"
 #include "svc_encode_mb.h"
 #include "svc_encode_slice.h"
+#include "wels_stego_internal.h"
 namespace WelsEnc {
 static const ALIGNED_DECLARE (int8_t, g_kiIntra16AvaliMode[8][5], 16) = {
   { I16_PRED_DC_128, I16_PRED_INVALID, I16_PRED_INVALID, I16_PRED_INVALID, 1 },
@@ -1596,6 +1597,72 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
     sMeRefine.pfCopyBlockByMode =
       pFunc->pfCopy16x16NotAligned; // dst can be align with 16 bytes, but not sure at pSrc, 12/29/2011
     MeRefineFracPixel (pEncCtx, pDstLuma, &pWelsMd->sMe.sMe16x16, &sMeRefine, 16, 16);
+
+    /* phasm-stego HOOK-H1: P_16x16 MVD post-refine override. Per the audit
+     * (openh264-hook-sites-mvd.md §"P_16x16 / Hook insertion point"), this
+     * site sits between MeRefineFracPixel (which finalizes the qpel MV +
+     * runs luma MC at that MV) and UpdateP16x16MotionInfo (which broadcasts
+     * the MV into pCurMb->sMv[0..15] + the neighbour cache).
+     *
+     * Cascade-safety requirements for this site:
+     *  1. After helper overrides sMe16x16.sMv, the LUMA prediction in
+     *     pMemPredLuma is stale (MeRefineFracPixel computed it at the
+     *     pre-override MV). We must re-run luma MC at the new MV before
+     *     WelsInterMbEncode runs its DCT/quant on (pEncMb - pMemPredLuma).
+     *     Without this, residual would be computed against the old MV's
+     *     prediction while the bitstream emits the new MV → decoder MCs
+     *     at new MV + applies the "wrong" residual → recon divergence.
+     *  2. Chroma MC at lines 1611-1612 reads pWelsMd->sMe.sMe16x16.sMv
+     *     AFTER our hook, so it picks up the override automatically.
+     *  3. pCurMb->sP16x16Mv was set at WelsMdP16x16 line 1018 from the
+     *     PRE-refine MV. UpdateP16x16MotionInfo does NOT refresh it.
+     *     The helper updates sMvList via pointer but doesn't know about
+     *     sP16x16Mv — refresh it manually post-helper.
+     *  4. PredSkipMv collision check: if the override MV would equal
+     *     PredSkipMv, WelsMdInterDoubleCheckPskip (line 1942) silently
+     *     demotes 16x16 → Skip, dropping the stego bits entirely. The
+     *     helper's check_pskip_collision flag refuses such overrides.
+     *
+     * Helper contract: the callback receives PHASM_DOMAIN_MVD_SIGN per
+     * non-zero MVD component (X then Y) and PHASM_DOMAIN_MVD_SUFFIX_LSB
+     * when |MVD| >= 9. Overrides only commit if the result doesn't
+     * collide with PredSkipMv. */
+    if (PhasmStegoGetEncPreEmit() != NULL) {
+      SMVUnitXY phasm_pred_skip;
+      PredSkipMv(pMbCache, &phasm_pred_skip);
+      PhasmMvHookCtx phasm_h1_ctx;
+      phasm_h1_ctx.frame_num     = PhasmStegoGetFrameNum();
+      phasm_h1_ctx.mb_x          = (uint16_t)pCurMb->iMbX;
+      phasm_h1_ctx.mb_y          = (uint16_t)pCurMb->iMbY;
+      phasm_h1_ctx.partition_idx = 0;
+      phasm_h1_ctx.ref_idx       = (uint8_t)pWelsMd->uiRef;
+      phasm_h1_ctx.check_pskip_collision = 1;
+      phasm_h1_ctx._reserved     = 0;
+      phasm_h1_ctx.mvp_x_qpel    = pWelsMd->sMe.sMe16x16.sMvp.iMvX;
+      phasm_h1_ctx.mvp_y_qpel    = pWelsMd->sMe.sMe16x16.sMvp.iMvY;
+      phasm_h1_ctx.pred_skip_mv_x = phasm_pred_skip.iMvX;
+      phasm_h1_ctx.pred_skip_mv_y = phasm_pred_skip.iMvY;
+      phasm_h1_ctx.mv_x_qpel     = &pWelsMd->sMe.sMe16x16.sMv.iMvX;
+      phasm_h1_ctx.mv_y_qpel     = &pWelsMd->sMe.sMe16x16.sMv.iMvY;
+      phasm_h1_ctx.mvList_x_qpel = &pCurDqLayer->pDecPic->sMvList[pCurMb->iMbXY].iMvX;
+      phasm_h1_ctx.mvList_y_qpel = &pCurDqLayer->pDecPic->sMvList[pCurMb->iMbXY].iMvY;
+      if (phasm_apply_mvd_hooks(&phasm_h1_ctx)) {
+        /* sP16x16Mv refresh (stale post-refine; UpdateP16x16MotionInfo
+         * doesn't write it). */
+        pCurMb->sP16x16Mv = pWelsMd->sMe.sMe16x16.sMv;
+        /* Re-run luma MC at the modified qpel MV. pMemPredLuma was
+         * filled by MeRefineFracPixel at the pre-override MV; overwrite
+         * with MC at the new MV so subsequent DCT/residual emit is
+         * consistent with the bitstream's MV. */
+        pFunc->sMcFuncs.pMcLumaFunc(pMbCache->SPicData.pRefMb[0],
+                                     pCurDqLayer->pRefPic->iLineSize[0],
+                                     pDstLuma, MB_WIDTH_LUMA,
+                                     pWelsMd->sMe.sMe16x16.sMv.iMvX,
+                                     pWelsMd->sMe.sMe16x16.sMv.iMvY,
+                                     16, 16);
+      }
+    }
+
     UpdateP16x16MotionInfo (pMbCache, pCurMb, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x16.sMv);
 
     pMbCache->sMbMvp[0] = pWelsMd->sMe.sMe16x16.sMvp;
