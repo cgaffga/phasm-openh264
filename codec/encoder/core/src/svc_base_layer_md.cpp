@@ -46,6 +46,73 @@
 #include "svc_encode_slice.h"
 #include "wels_stego_internal.h"
 namespace WelsEnc {
+
+/* phasm-stego HOOK-H2..H7 partition MVD helper. Shared by P_16x8, P_8x16,
+ * P_8x8 sub-MB types {SUB_MB_TYPE_8x8, SUB_MB_TYPE_4x4, SUB_MB_TYPE_8x4,
+ * SUB_MB_TYPE_4x8}. Per the audit (openh264-hook-sites-mvd.md):
+ *
+ *  - No PredSkipMv collision check: Skip silent demote only fires on the
+ *    P_16x16 path (WelsMdInterDoubleCheckPskip line 1942 requires
+ *    uiMbType == MB_TYPE_16x16).
+ *  - No sMvList refresh: temporal predictor cascade only loads sMvList[]
+ *    for P_16x16 / Skip / Background paths (WelsMdP16x16 :1019). For
+ *    partitions, sMvList stays at its per-MB init value (0).
+ *  - Re-run luma MC at the modified per-partition MV using the
+ *    partition's pRef/pDst offsets. Chroma MC at the end of each
+ *    partition loop iteration in WelsMdInterMbRefinement reads
+ *    pWelsMd->sMe.sMe*[i].sMv AFTER our hook and picks up the override
+ *    automatically.
+ *
+ * Position descriptor:
+ *  - partition_idx encodes the 4x4-block index of the partition's
+ *    top-left sub-block within the MB (0..15). The phasm-side callback
+ *    disambiguates partition shape via the MB type parsed from the
+ *    cover bitstream. */
+static inline void phasm_apply_h_partition_hook(
+    SDqLayer* pCurDqLayer,
+    SWelsFuncPtrList* pFunc,
+    SMbCache* pMbCache,
+    SMB* pCurMb,
+    uint8_t* pDstLumaBase,
+    SWelsME* pMe,
+    uint8_t partition_idx,
+    uint8_t ref_idx,
+    uint8_t iIdx,
+    int32_t blockW,
+    int32_t blockH) {
+  if (PhasmStegoGetEncPreEmit() == NULL) return;
+  PhasmMvHookCtx ctx;
+  ctx.frame_num     = PhasmStegoGetFrameNum();
+  ctx.mb_x          = (uint16_t)pCurMb->iMbX;
+  ctx.mb_y          = (uint16_t)pCurMb->iMbY;
+  ctx.partition_idx = partition_idx;
+  ctx.ref_idx       = ref_idx;
+  ctx.check_pskip_collision = 0;
+  ctx._reserved     = 0;
+  ctx.mvp_x_qpel    = pMe->sMvp.iMvX;
+  ctx.mvp_y_qpel    = pMe->sMvp.iMvY;
+  ctx.pred_skip_mv_x = 0;
+  ctx.pred_skip_mv_y = 0;
+  ctx.mv_x_qpel     = &pMe->sMv.iMvX;
+  ctx.mv_y_qpel     = &pMe->sMv.iMvY;
+  ctx.mvList_x_qpel = NULL;
+  ctx.mvList_y_qpel = NULL;
+  if (phasm_apply_mvd_hooks(&ctx)) {
+    int32_t refLineSize = pCurDqLayer->pRefPic->iLineSize[0];
+    uint8_t addr = g_kuiSmb4AddrIn256[iIdx];
+    int32_t px = (int32_t)(addr & 0x0f);
+    int32_t py = (int32_t)(addr >> 4);
+    pFunc->sMcFuncs.pMcLumaFunc(
+        pMbCache->SPicData.pRefMb[0] + py * refLineSize + px,
+        refLineSize,
+        pDstLumaBase + addr,
+        MB_WIDTH_LUMA,
+        pMe->sMv.iMvX,
+        pMe->sMv.iMvY,
+        blockW, blockH);
+  }
+}
+
 static const ALIGNED_DECLARE (int8_t, g_kiIntra16AvaliMode[8][5], 16) = {
   { I16_PRED_DC_128, I16_PRED_INVALID, I16_PRED_INVALID, I16_PRED_INVALID, 1 },
   { I16_PRED_DC_L,   I16_PRED_H,       I16_PRED_INVALID, I16_PRED_INVALID, 2 },
@@ -1697,6 +1764,11 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_STRIDE_BLK8;
       PredInter16x8Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe16x8[i], &sMeRefine, 16, 8);
+      /* phasm-stego HOOK-H2: P_16x8 MVD post-refine override per partition. */
+      phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                    pDstLuma, &pWelsMd->sMe.sMe16x8[i],
+                                    (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
+                                    (uint8_t)iIdx, 16, 8);
       UpdateP16x8MotionInfo (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe16x8[i].sMvp;
       //save the best cost of final mode
@@ -1727,6 +1799,11 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_WIDTH_BLK8;
       PredInter8x16Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe8x16[i], &sMeRefine, 8, 16);
+      /* phasm-stego HOOK-H3: P_8x16 MVD post-refine override per partition. */
+      phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                    pDstLuma, &pWelsMd->sMe.sMe8x16[i],
+                                    (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
+                                    (uint8_t)iIdx, 8, 16);
       update_P8x16_motion_info (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe8x16[i].sMvp;
       //save the best cost of final mode
@@ -1759,6 +1836,11 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
         InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx8x8[i]);
         PredMv (&pMbCache->sMvComponents, iBlk8Idx, 2, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMvp);
         MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk8Idx], &pWelsMd->sMe.sMe8x8[i], &sMeRefine, 8, 8);
+        /* phasm-stego HOOK-H4: P_8x8/SUB_MB_TYPE_8x8 MVD per 8x8 partition. */
+        phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                      pDstLuma, &pWelsMd->sMe.sMe8x8[i],
+                                      (uint8_t)iBlk8Idx, (uint8_t)pWelsMd->uiRef,
+                                      (uint8_t)iBlk8Idx, 8, 8);
         UpdateP8x8MotionInfo (pMbCache, pCurMb, iBlk8Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMv);
         pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk8Idx]] = pWelsMd->sMe.sMe8x8[i].sMvp;
         iBestSadCost += pWelsMd->sMe.sMe8x8[i].uiSadCost;
@@ -1790,6 +1872,13 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx4x4[i][j]);
           PredMv (&pMbCache->sMvComponents, iBlk4x4Idx, 1, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x4[i][j].sMvp);
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe4x4[i][j], &sMeRefine, 4, 4);
+          /* phasm-stego HOOK-H5: P_8x8/SUB_MB_TYPE_4x4 MVD (dead code in
+           * v2.6.0 stock builds — pfInterFineMd pins to SUB_MB_TYPE_8x8;
+           * wired for completeness if future build flags enable 4x4). */
+          phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                        pDstLuma, &pWelsMd->sMe.sMe4x4[i][j],
+                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)iBlk4x4Idx, 4, 4);
           UpdateP4x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk4x4Idx]] = pWelsMd->sMe.sMe4x4[i][j].sMvp;
           iBestSadCost += pWelsMd->sMe.sMe4x4[i][j].uiSadCost;
@@ -1822,6 +1911,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx4x4[i][j << 1]);
           PredMv (&pMbCache->sMvComponents, iBlk4x4Idx, 2, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x4[i][j].sMvp);
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe8x4[i][j], &sMeRefine, 8, 4);
+          /* phasm-stego HOOK-H6: P_8x8/SUB_MB_TYPE_8x4 MVD (dead code in
+           * v2.6.0 stock builds). */
+          phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                        pDstLuma, &pWelsMd->sMe.sMe8x4[i][j],
+                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)iBlk4x4Idx, 8, 4);
           UpdateP8x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
           //pMbCache->sMbMvp[g_kuiMbCountScan4Idx[1 + iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
@@ -1855,6 +1950,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx4x4[i][j]);
           PredMv (&pMbCache->sMvComponents, iBlk4x4Idx, 1, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x8[i][j].sMvp);
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe4x8[i][j], &sMeRefine, 4, 8);
+          /* phasm-stego HOOK-H7: P_8x8/SUB_MB_TYPE_4x8 MVD (dead code in
+           * v2.6.0 stock builds). */
+          phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
+                                        pDstLuma, &pWelsMd->sMe.sMe4x8[i][j],
+                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)iBlk4x4Idx, 4, 8);
           UpdateP4x8MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x8[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe4x8[i][j].sMvp;
           //pMbCache->sMbMvp[g_kuiMbCountScan4Idx[4 + iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
