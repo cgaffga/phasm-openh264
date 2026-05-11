@@ -14,6 +14,7 @@ test_sources = [
   'EncUT_MotionCompensation.cpp',
   'EncUT_MotionEstimate.cpp',
   'EncUT_ParameterSetStrategy.cpp',
+  'EncUT_PhasmStegoHelpers.cpp',
   'EncUT_Reconstruct.cpp',
   'EncUT_Sample.cpp',
   'EncUT_SVC_me.cpp',
