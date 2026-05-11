@@ -27,6 +27,7 @@ cpp_sources = [
   'core/src/svc_set_mb_syn_cabac.cpp',
   'core/src/svc_set_mb_syn_cavlc.cpp',
   'core/src/wels_preprocess.cpp',
+  'core/src/wels_stego.cpp',
   'core/src/wels_task_base.cpp',
   'core/src/wels_task_encoder.cpp',
   'core/src/wels_task_management.cpp',
