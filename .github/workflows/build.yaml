@@ -1,8 +1,16 @@
 name: CI
 
-on: 
+# phasm-stego: scoped to the `master` mirror branch only. Cisco's full
+# multi-platform matrix runs when we fast-forward `master` to a newer
+# Cisco tag (rare, voluntary). Pushes to `phasm-stego` are exercised
+# by `.github/workflows/phasm-stego-ci.yml` instead — narrower, no
+# artifact uploads, no fuzzing. Master ↔ phasm-stego separation keeps
+# upstream's CI semantically valid on its own branch.
+on:
   push:
+    branches: [master]
   pull_request:
+    branches: [master]
 
 jobs:
   build:

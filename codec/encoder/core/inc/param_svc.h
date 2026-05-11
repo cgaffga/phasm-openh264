@@ -142,8 +142,22 @@ typedef struct TagWelsSvcCodingParam: SEncParamExt {
     param.iComplexityMode       = LOW_COMPLEXITY;
     param.iTargetBitrate        = UNSPECIFIED_BIT_RATE; // overall target bitrate introduced in RC module
     param.iMaxBitrate           = UNSPECIFIED_BIT_RATE;
+    // phasm-stego defaults: deterministic-first posture. Each of the
+    // flags flipped here is documented in two-encoder-architecture.md
+    // (docs/design/video/h264 in cgaffga/phasm). All can still be
+    // overridden at runtime per encoder session; only the *defaults*
+    // change. Rationale (per phasm RCMode=0 measurements 2026-05-11):
+    // scene-change / background / adaptive-Q detection caused per-frame
+    // quality drift ("first 5 frames clean, rest at 18-23 dB") that
+    // breaks the stego cover-vs-emit byte-determinism invariant. Frame
+    // skip + load balancing introduce non-deterministic state-machine
+    // transitions for the same reason.
     param.iMultipleThreadIdc    = 1;
-    param.bUseLoadBalancing = true;
+    param.bUseLoadBalancing     = false;  // was true; only matters under
+                                          // multi-slice + multi-thread,
+                                          // but defensive — its run-time
+                                          // dynamic slicing breaks
+                                          // determinism by design.
 
     param.iLTRRefNum            = 0;
     param.iLtrMarkPeriod        = 30;   //the min distance of two int32_t references
@@ -163,10 +177,12 @@ typedef struct TagWelsSvcCodingParam: SEncParamExt {
     param.iPaddingFlag                  = 0;
     param.iEntropyCodingModeFlag        = 0;
     param.bEnableDenoise                = false;        // denoise control
-    param.bEnableSceneChangeDetect      = true;         // scene change detection control
-    param.bEnableBackgroundDetection    = true;         // background detection control
-    param.bEnableAdaptiveQuant          = true;         // adaptive quantization control
-    param.bEnableFrameSkip              = true;         // frame skipping
+    // phasm-stego: the four flags below are flipped false (was true).
+    // See header comment near iMultipleThreadIdc above for rationale.
+    param.bEnableSceneChangeDetect      = false;        // scene change detection control (phasm: was true)
+    param.bEnableBackgroundDetection    = false;        // background detection control   (phasm: was true)
+    param.bEnableAdaptiveQuant          = false;        // adaptive quantization control  (phasm: was true)
+    param.bEnableFrameSkip              = false;        // frame skipping                  (phasm: was true)
     param.bEnableLongTermReference      = false;        // long term reference control
     param.eSpsPpsIdStrategy             = INCREASING_ID;// pSps pPps id addition control
     param.bPrefixNalAddingCtrl          = false;        // prefix NAL adding control

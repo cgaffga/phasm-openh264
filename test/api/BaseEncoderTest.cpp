@@ -11,6 +11,17 @@ static int InitWithParam (ISVCEncoder* encoder, SEncParamExt* pEncParamExt) {
   bool bBaseParamFlag      = (SM_SINGLE_SLICE == eSliceMode             && !pEncParamExt->bEnableDenoise
                               && pEncParamExt->iSpatialLayerNum == 1     && !pEncParamExt->bIsLosslessLink
                               && !pEncParamExt->bEnableLongTermReference && !pEncParamExt->iEntropyCodingModeFlag) ? true : false;
+  // phasm-stego: force all CompareOutput tests onto the InitializeExt
+  // path so the explicit upstream-default restoration below (line ~36)
+  // applies. The original bBaseParamFlag shortcut routes simple cases
+  // through Initialize(SEncParamBase*), which goes via
+  // SWelsSvcCodingParam(...) -> FillDefault. With phasm's flipped
+  // defaults, that path produces different bitstreams than the canonical
+  // SHA-1 hashes pinned in encoder_test.cpp / decode_encode_test.cpp.
+  // Initialize() is just a thin wrapper around InitializeExt internally
+  // (welsEncoderExt.cpp ~ParamBaseTranscode -> InitializeInternal), so
+  // routing through the Ext path loses minimal API coverage.
+  bBaseParamFlag = false;
   if (bBaseParamFlag) {
     SEncParamBase param;
     memset (&param, 0, sizeof (SEncParamBase));
@@ -24,6 +35,19 @@ static int InitWithParam (ISVCEncoder* encoder, SEncParamExt* pEncParamExt) {
   } else {
     SEncParamExt param;
     encoder->GetDefaultParams (&param);
+
+    // phasm-stego: the canonical Cisco SHA-1 hashes embedded in
+    // encoder_test.cpp / decode_encode_test.cpp were generated with the
+    // upstream defaults (scene-change, background, adaptive-Q, frame-skip,
+    // load-balancing all true). The phasm-stego branch flips these false
+    // in param_svc.h::FillDefault for stego determinism, so we restore
+    // them here so the upstream test bench continues to exercise the
+    // upstream encoder mode and the reference hashes still match.
+    param.bEnableSceneChangeDetect   = true;
+    param.bEnableBackgroundDetection = true;
+    param.bEnableAdaptiveQuant       = true;
+    param.bEnableFrameSkip           = true;
+    param.bUseLoadBalancing          = true;
 
     param.iUsageType       = pEncParamExt->iUsageType;
     param.fMaxFrameRate    = pEncParamExt->fMaxFrameRate;
