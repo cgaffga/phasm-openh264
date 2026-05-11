@@ -46,6 +46,7 @@
 #include "svc_set_mb_syn.h"
 #include "decode_mb_aux.h"
 #include "svc_mode_decision.h"
+#include "wels_stego_internal.h"  /* phasm_emit_md_cost (Phase A.5(j)) */
 
 namespace WelsEnc {
 //#define ENC_TRACE
@@ -566,6 +567,11 @@ TRY_REENCODING:
     WelsMdIntraMb (pEncCtx, &sMd, pCurMb, pMbCache);
     UpdateNonZeroCountCache (pCurMb, pMbCache);
 
+    /* phasm-stego A.5(j): fire md_cost_capture with the winning mb_type
+     * so consumers can filter pre-emit fires (which include candidate-
+     * mode evaluations) down to wire-bound positions. */
+    phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                        pCurMb->uiMbType, pCurMb->uiCbp);
 
     iEncReturn = pEncCtx->pFuncList->pfWelsSpatialWriteMbSyn (pEncCtx, pSlice, pCurMb);
     if (!pEncCtx->pSvcParam->iEntropyCodingModeFlag) {
@@ -641,6 +647,10 @@ TRY_REENCODING:
     sMd.iLambda = g_kiQpCostTable[pCurMb->uiLumaQp];
     WelsMdIntraMb (pEncCtx, &sMd, pCurMb, pMbCache);
     UpdateNonZeroCountCache (pCurMb, pMbCache);
+
+    /* phasm-stego A.5(j): see I-slice main path above. */
+    phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                        pCurMb->uiMbType, pCurMb->uiCbp);
 
     iEncReturn = pEncCtx->pFuncList->pfWelsSpatialWriteMbSyn (pEncCtx, pSlice, pCurMb);
     if (iEncReturn == ENC_RETURN_VLCOVERFLOWFOUND && (pCurMb->uiLumaQp < 50)) {
@@ -1856,6 +1866,11 @@ TRY_REENCODING:
     //step (5): update cache
     UpdateNonZeroCountCache (pCurMb, pMbCache);
 
+    /* phasm-stego A.5(j): fire md_cost_capture with the winning mb_type
+     * (P-slice main path). See svc_encode_slice.cpp I-slice site above. */
+    phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                        pCurMb->uiMbType, pCurMb->uiCbp);
+
     //step (6): begin to write bit stream; if the pSlice size is controlled, the writing may be skipped
 
     iEncReturn = pEncCtx->pFuncList->pfWelsSpatialWriteMbSyn (pEncCtx, pSlice, pCurMb);
@@ -1964,6 +1979,10 @@ TRY_REENCODING:
 
     //step (5): update cache
     UpdateNonZeroCountCache (pCurMb, pMbCache);
+
+    /* phasm-stego A.5(j): see P-slice main path above. */
+    phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                        pCurMb->uiMbType, pCurMb->uiCbp);
 
     //step (6): begin to write bit stream; if the pSlice size is controlled, the writing may be skipped
 

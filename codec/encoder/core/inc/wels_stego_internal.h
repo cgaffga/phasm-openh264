@@ -148,6 +148,24 @@ int /*bool*/ phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
                                                 int16_t pred_skip_mv_x,
                                                 int16_t pred_skip_mv_y);
 
+/* ---------------------------------------------------------------------
+ * phasm_emit_md_cost
+ *
+ * Fire the registered md_cost_capture callback (if any) with the
+ * winning mb_type + CBP for one MB. Called from svc_encode_slice.cpp
+ * AFTER mode decision finalizes and BEFORE the bitstream writer emits
+ * the MB. The MB's `uiMbType` and `uiCbp` are read from `pCurMb`.
+ *
+ * Translates OpenH264's internal MB_TYPE_* bitfield into a small
+ * PHASM_MB_TYPE_* classification so the consumer's filter-by-block_cat
+ * logic stays trivial (one byte-lookup, no enum-bitfield arithmetic).
+ *
+ * No-op if no callback is registered. The hot path is one frame_num +
+ * mb_x + mb_y read, a 6-way switch on uiMbType, and the dispatch.
+ * ------------------------------------------------------------------ */
+void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
+                        uint32_t internal_mb_type, uint8_t cbp);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

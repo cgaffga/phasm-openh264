@@ -124,14 +124,39 @@ typedef struct PhasmStegoPos {
  * planner's model in `core/src/codec/h264/stego/`).
  * ------------------------------------------------------------------ */
 
+/* mb_type classification — phasm-defined, NOT the H.264 spec mb_type.
+ * Carries the information a consumer needs to filter pre-emit hook fires
+ * by block_cat consistency (since the encoder may evaluate multiple
+ * candidate modes per MB but only the winner's coefficients reach the
+ * wire). Each value names the EMITTED-RESIDUAL shape:
+ *
+ *   PHASM_MB_TYPE_I_4x4    : intra 4x4 luma residual (block_cat 2) +
+ *                            chroma DC/AC (block_cat 3/4).
+ *   PHASM_MB_TYPE_I_16x16  : intra 16x16 luma DC (block_cat 0) +
+ *                            luma AC (block_cat 1) + chroma DC/AC.
+ *   PHASM_MB_TYPE_I_8x8    : intra 8x8 luma residual (block_cat 5)
+ *                            + chroma. (High-profile only.)
+ *   PHASM_MB_TYPE_INTER    : inter prediction with 4x4 luma residual
+ *                            (block_cat 2) + chroma.
+ *   PHASM_MB_TYPE_SKIP     : P_Skip / B_Skip / B_Direct — no residual
+ *                            emitted. Drop all coefficient hook fires
+ *                            for this MB.
+ */
+#define PHASM_MB_TYPE_I_4x4    0
+#define PHASM_MB_TYPE_I_16x16  1
+#define PHASM_MB_TYPE_I_8x8    2
+#define PHASM_MB_TYPE_INTER    3
+#define PHASM_MB_TYPE_SKIP     4
+#define PHASM_MB_TYPE_OTHER    5
+
 typedef struct PhasmStegoMdCost {
   uint32_t frame_num;
   uint16_t mb_x;
   uint16_t mb_y;
-  uint8_t  mb_type;         /* mb_type enum value (I_16x16 / I_4x4 / P_16x16 / ... ) */
-  uint8_t  cbp;             /* CBP nibble: low 4 bits = luma 8x8 CBP, high 4 = chroma CBP */
+  uint8_t  mb_type;         /* PHASM_MB_TYPE_* classification */
+  uint8_t  cbp;             /* CBP nibble: low 4 = luma 8x8 CBP, high 4 = chroma. 0 in ABI 1.1.0. */
   uint16_t _reserved;
-  uint16_t capacity[PHASM_DOMAIN__COUNT_];  /* candidate bin count per domain */
+  uint16_t capacity[PHASM_DOMAIN__COUNT_];  /* per-domain bin count, 0 in ABI 1.1.0 */
 } PhasmStegoMdCost;  /* 24 bytes */
 
 /* ---------------------------------------------------------------------
@@ -181,9 +206,19 @@ typedef void (*PhasmStegoDecPostReadFn)(const PhasmStegoPos* pos,
 /* ---------------------------------------------------------------------
  * 6. Mode-decision cost-capture callback
  *
- * Fires once per MB after mode decision finalizes. Pure observation;
- * no return value. Used by phasm's planner to estimate per-MB capacity
- * across the encode before committing to position allocation.
+ * Fires once per MB after mode decision finalizes, immediately before
+ * the bitstream writer emits the MB. Pure observation; no return value.
+ *
+ * Primary use case (ABI 1.1.0): consumers can pair this with the
+ * pre-emit callback to filter hook fires by `block_cat` ↔ `mb_type`
+ * consistency. The encoder evaluates I_4x4 candidate for every intra
+ * MB (firing block_cat=2 hooks), then may switch to I_16x16 if the
+ * cost is lower. Without `mb_type` it is impossible to distinguish
+ * the losing-mode candidate fires from the winner-mode wire emissions.
+ *
+ * Future use case: `capacity[]` will carry per-domain bin counts so a
+ * cross-MB cost-vector planner can size its STC plan against the
+ * full encode without re-running mode decision.
  * ------------------------------------------------------------------ */
 
 typedef void (*PhasmStegoMdCostFn)(const PhasmStegoMdCost* cost,
@@ -240,10 +275,11 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
  * breaking changes; MINOR on additive (new callback fields appended
  * to the end of structs); PATCH on doc-only changes.
  *
- * Current version: 1.0.0 (0x010000).
+ * Current version: 1.1.0 (0x010100). 1.1.0 wires `md_cost_capture` in
+ * the encoder (1.0.0 had it in the API but never fired it).
  * ------------------------------------------------------------------ */
 
-#define PHASM_STEGO_ABI_VERSION 0x010000u
+#define PHASM_STEGO_ABI_VERSION 0x010100u
 uint32_t WelsStegoAbiVersion(void);
 
 #ifdef __cplusplus

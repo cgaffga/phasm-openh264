@@ -273,6 +273,55 @@ int phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
   return (mv_x == pred_skip_mv_x && mv_y == pred_skip_mv_y) ? 1 : 0;
 }
 
+void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
+                        uint32_t internal_mb_type, uint8_t cbp) {
+  PhasmStegoMdCostFn cb = g_phasm_callbacks.md_cost_capture;
+  if (cb == nullptr) return;
+
+  /* Translate OpenH264's MB_TYPE_* bitfield (codec/common/inc/
+   * wels_common_defs.h) into a phasm classification byte. Mapping is
+   * defined to mirror EMITTED-RESIDUAL shape so the consumer's filter
+   * is one block_cat / mb_type table lookup.
+   *
+   *   MB_TYPE_INTRA4x4    0x01 -> I_4x4
+   *   MB_TYPE_INTRA16x16  0x02 -> I_16x16
+   *   MB_TYPE_INTRA8x8    0x04 -> I_8x8
+   *   MB_TYPE_16x16/16x8/8x16/8x8/8x8_REF0 -> INTER
+   *   MB_TYPE_SKIP        0x100 -> SKIP
+   *   any other / mixed -> OTHER
+   *
+   * Test MB_TYPE_SKIP first (it can co-occur with other flags on some
+   * code paths, and we always want "no residual" semantics).
+   */
+  uint8_t klass;
+  if (internal_mb_type & 0x100u /* MB_TYPE_SKIP */) {
+    klass = PHASM_MB_TYPE_SKIP;
+  } else if (internal_mb_type & 0x02u /* MB_TYPE_INTRA16x16 */) {
+    klass = PHASM_MB_TYPE_I_16x16;
+  } else if (internal_mb_type & 0x01u /* MB_TYPE_INTRA4x4 */) {
+    klass = PHASM_MB_TYPE_I_4x4;
+  } else if (internal_mb_type & 0x04u /* MB_TYPE_INTRA8x8 */) {
+    klass = PHASM_MB_TYPE_I_8x8;
+  } else if (internal_mb_type & 0x000000F8u /* INTER 16x16|16x8|8x16|8x8|8x8_REF0 */) {
+    klass = PHASM_MB_TYPE_INTER;
+  } else {
+    klass = PHASM_MB_TYPE_OTHER;
+  }
+
+  PhasmStegoMdCost cost;
+  cost.frame_num   = g_phasm_frame_num;
+  cost.mb_x        = mb_x;
+  cost.mb_y        = mb_y;
+  cost.mb_type     = klass;
+  cost.cbp         = cbp;
+  cost._reserved   = 0;
+  cost.capacity[0] = 0;  /* ABI 1.1.0: capacity counts deferred to v1.x+ */
+  cost.capacity[1] = 0;
+  cost.capacity[2] = 0;
+  cost.capacity[3] = 0;
+  cb(&cost, g_phasm_user_data);
+}
+
 int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   if (ctx == nullptr || ctx->mv_x_qpel == nullptr || ctx->mv_y_qpel == nullptr) {
     return 0;
