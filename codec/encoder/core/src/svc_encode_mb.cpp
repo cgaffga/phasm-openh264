@@ -119,6 +119,41 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
 
   for (i = 0; i < 4; i++) {
     pFuncList->pfQuantizationFour4x4 (pRes, pFF,  pMF);
+
+    /* phasm-stego HOOK-B: I_16x16 luma AC, post-quant pre-scan, ×4 strips.
+     * pRes points to the current strip (64 ints). Each strip holds 4 sub-
+     * blocks at pRes[0..15], pRes[16..31], pRes[32..47], pRes[48..63] in
+     * raster-within-sub-block order. We skip raster index 0 of each sub-
+     * block (DC re-injection slot — line 154-169 below copies aDctT4Dc[]
+     * into these positions AFTER our hook fires, so any AC override here
+     * would be overwritten). Hook on raster 1..15 only.
+     * Both readers of pRes after this point — the 4 pfScan4x4Ac calls
+     * below (CABAC path) and the per-strip pfDequantizationFour4x4 at
+     * line ~150 (recon path) — see the modified values. Single-write
+     * suffices. */
+    {
+      PhasmStegoPos phasm_pos_b;
+      phasm_pos_b.frame_num     = PhasmStegoGetFrameNum();
+      phasm_pos_b.mb_x          = (uint16_t)pCurMb->iMbX;
+      phasm_pos_b.mb_y          = (uint16_t)pCurMb->iMbY;
+      phasm_pos_b.partition_idx = 0;
+      phasm_pos_b.sub_block     = 0;
+      phasm_pos_b.coeff_idx     = 0;
+      phasm_pos_b.block_cat     = 0;
+      phasm_pos_b.ref_idx       = 0xff;
+      phasm_pos_b.mv_component  = 0xff;
+      phasm_pos_b._reserved     = 0;
+      for (uint8_t phasm_sb = 0; phasm_sb < 4; ++phasm_sb) {
+        for (uint8_t phasm_c = 1; phasm_c < 16; ++phasm_c) {  /* skip DC slot */
+          phasm_apply_coeff_hooks (&phasm_pos_b,
+                                   /*sub_block=*/(uint8_t)(i * 4 + phasm_sb),
+                                   /*coeff_idx=*/phasm_c,
+                                   PHASM_BLOCK_CAT_LUMA_AC,
+                                   &pRes[phasm_sb * 16 + phasm_c]);
+        }
+      }
+    }
+
     pFuncList->pfScan4x4Ac (pBlock,      pRes);
     pFuncList->pfScan4x4Ac (pBlock + 16, pRes + 16);
     pFuncList->pfScan4x4Ac (pBlock + 32, pRes + 32);
