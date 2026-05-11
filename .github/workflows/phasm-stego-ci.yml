@@ -86,6 +86,7 @@ jobs:
           cat > /tmp/dgate.cpp <<'CPP'
           #include "codec_api.h"
           #include "codec_app_def.h"
+          #include <cstdint>
           #include <cstdio>
           #include <cstdlib>
           #include <cstring>
