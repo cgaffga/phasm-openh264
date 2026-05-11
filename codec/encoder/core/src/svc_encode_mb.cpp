@@ -42,8 +42,18 @@
 #include "encode_mb_aux.h"
 #include "decode_mb_aux.h"
 #include "ls_defines.h"
+#include "wels_stego_internal.h"
 
 namespace WelsEnc {
+
+/* phasm-stego: ECtxBlockCat enum is in set_mb_syn_cavlc.h; the hook
+ * helper only consumes the integer pass-through. Literal values match
+ * the enum (LUMA_DC=0, LUMA_AC=1, LUMA_4x4=2, CHROMA_DC=3, CHROMA_AC=4). */
+#define PHASM_BLOCK_CAT_LUMA_DC     0
+#define PHASM_BLOCK_CAT_LUMA_AC     1
+#define PHASM_BLOCK_CAT_LUMA_4x4    2
+#define PHASM_BLOCK_CAT_CHROMA_DC   3
+#define PHASM_BLOCK_CAT_CHROMA_AC   4
 void WelsDctMb (int16_t* pRes, uint8_t* pEncMb, int32_t iEncStride, uint8_t* pBestPred, PDctFunc pfDctFourT4) {
   pfDctFourT4 (pRes,       pEncMb,                      iEncStride, pBestPred,       16);
   pfDctFourT4 (pRes + 64,  pEncMb + 8,                  iEncStride, pBestPred + 8,   16);
@@ -72,6 +82,38 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
 
   pFuncList->pfTransformHadamard4x4Dc (aDctT4Dc, pRes);
   pFuncList->pfQuantizationDc4x4 (aDctT4Dc, pFF[0] << 1, pMF[0]>>1);
+
+  /* phasm-stego HOOK-A: I_16x16 luma DC, post-quant pre-scan. Each of
+   * the 16 entries in aDctT4Dc holds the (Hadamard-transformed,
+   * quantized) DC of one 4x4 sub-block. The subsequent scan at line
+   * below writes the array into pMbCache->pDct->iLumaI16x16Dc (CABAC's
+   * input). The dequant at end-of-function (WelsIHadamard4x4Dc +
+   * pfDequantizationIHadamard4x4) reads the same aDctT4Dc array for the
+   * recon path. So modifying any entry here propagates into BOTH the
+   * bitstream AND the encoder's reference frame consistently — no
+   * dual-write needed. See docs/design/video/h264/openh264-hook-sites-
+   * intra.md (consumer repo) for the audit. */
+  {
+    PhasmStegoPos phasm_pos;
+    phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
+    phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
+    phasm_pos.partition_idx = 0;
+    phasm_pos.sub_block     = 0;
+    phasm_pos.coeff_idx     = 0;
+    phasm_pos.block_cat     = 0;
+    phasm_pos.ref_idx       = 0xff;
+    phasm_pos.mv_component  = 0xff;
+    phasm_pos._reserved     = 0;
+    for (uint8_t phasm_k = 0; phasm_k < 16; ++phasm_k) {
+      phasm_apply_coeff_hooks (&phasm_pos,
+                               /*sub_block=*/phasm_k,
+                               /*coeff_idx=*/0,
+                               PHASM_BLOCK_CAT_LUMA_DC,
+                               &aDctT4Dc[phasm_k]);
+    }
+  }
+
   pFuncList->pfScan4x4 (pMbCache->pDct->iLumaI16x16Dc, aDctT4Dc);
   uiCountI16x16Dc = pFuncList->pfGetNoneZeroCount (pMbCache->pDct->iLumaI16x16Dc);
 

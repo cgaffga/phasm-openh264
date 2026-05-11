@@ -62,6 +62,17 @@ typedef struct PhasmMvHookCtx {
 } PhasmMvHookCtx;
 
 /* ---------------------------------------------------------------------
+ * Internal accessors for the registered callback state. Used by hook
+ * bodies in svc_encode_mb.cpp + svc_base_layer_md.cpp (Stages 1-7) to
+ * read the current frame number set via WelsStegoSetFrameNum, etc.
+ * ------------------------------------------------------------------ */
+uint32_t                PhasmStegoGetFrameNum(void);
+PhasmStegoEncPreEmitFn  PhasmStegoGetEncPreEmit(void);
+PhasmStegoDecPostReadFn PhasmStegoGetDecPostRead(void);
+PhasmStegoMdCostFn      PhasmStegoGetMdCostCapture(void);
+void*                   PhasmStegoGetUserData(void);
+
+/* ---------------------------------------------------------------------
  * phasm_apply_coeff_hooks
  *
  * Fire coeff_sign + coeff_suffix_lsb hooks on a single non-zero
