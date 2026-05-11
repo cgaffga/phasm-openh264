@@ -1,0 +1,51 @@
+BSD 2-Clause License (phasm-stego additions)
+
+Copyright (c) 2026, Christoph Gaffga (phasm.app stego extension)
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+* Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
+Scope of this addendum:
+
+This BSD 2-Clause addendum covers code added or modified by the
+phasm-stego branch on top of Cisco OpenH264 v2.6.0. The patches expose
+CABAC bin-emit hooks, mode-decision cost capture, and supporting C ABI
+surface to enable steganographic operations in the phasm.app stack.
+
+Cisco Systems, Inc.'s original OpenH264 code remains under the
+BSD 2-Clause license in the sibling LICENSE file at the repository root.
+Both licenses are BSD-2-Clause and fully compatible; redistributors must
+honor both copyright notices.
+
+The H.264 / AVC patent obligations to MPEG LA / Via LA are independent
+of this software license and are unaffected by either BSD-2-Clause
+grant. Cisco's signed openh264.org binary distribution program does NOT
+extend to derivative binaries built from this fork; downstreams that
+distribute binaries assemble their own Via LA AVC compliance posture.
+
+Upstream:  https://github.com/cisco/openh264
+This fork: https://github.com/cgaffga/phasm-openh264
+Consumer:  https://github.com/cgaffga/phasmcore
