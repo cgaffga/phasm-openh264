@@ -240,6 +240,38 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
 
   pFuncList->pfDctT4 (pResI4x4, & (pEncMb[pStrideEncBlockOffset[uiI4x4Idx]]), iEncStride, pBestPred, 4);
   pFuncList->pfQuantization4x4 (pResI4x4, pFF, pMF);
+
+  /* phasm-stego HOOK-E: I_4x4 luma, post-quant pre-scan. Called per
+   * 4x4 sub-block (uiI4x4Idx 0..15). pResI4x4 holds 16 quantized
+   * coefficients in raster within-sub-block order. Both readers of
+   * pResI4x4 after this point — the pfScan4x4 below (CABAC path) and
+   * the pfDequantization4x4 at line ~280 (recon path, which then
+   * pfIDctT4's into pPredI4x4 = pCsMb[sub-block offset]) — see the
+   * modified values. The reconstructed pixels written into pCsMb feed
+   * the intra-prediction of subsequent 4x4 sub-blocks within the same
+   * MB (intra-MB cascade per the audit). The contract — non-zero in /
+   * non-zero out — preserves nz count + CBP. */
+  {
+    PhasmStegoPos phasm_pos_e;
+    phasm_pos_e.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_e.mb_x          = (uint16_t)pCurMb->iMbX;
+    phasm_pos_e.mb_y          = (uint16_t)pCurMb->iMbY;
+    phasm_pos_e.partition_idx = 0;
+    phasm_pos_e.sub_block     = 0;
+    phasm_pos_e.coeff_idx     = 0;
+    phasm_pos_e.block_cat     = 0;
+    phasm_pos_e.ref_idx       = 0xff;
+    phasm_pos_e.mv_component  = 0xff;
+    phasm_pos_e._reserved     = 0;
+    for (uint8_t phasm_c = 0; phasm_c < 16; ++phasm_c) {
+      phasm_apply_coeff_hooks (&phasm_pos_e,
+                               /*sub_block=*/uiI4x4Idx,
+                               /*coeff_idx=*/phasm_c,
+                               PHASM_BLOCK_CAT_LUMA_4x4,
+                               &pResI4x4[phasm_c]);
+    }
+  }
+
   pFuncList->pfScan4x4 (pBlock, pResI4x4);
 
   iNoneZeroCount = pFuncList->pfGetNoneZeroCount (pBlock);
