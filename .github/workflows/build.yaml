@@ -129,24 +129,16 @@ jobs:
       - run: c++ --version
       - run: CFLAGS=-Werror make -j$(sysctl -n hw.ncpu) ARCH=arm64
 
-  fuzzing:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Build Fuzzers
-      id: build
-      uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'openh264'
-        language: c++
-    - name: Run Fuzzers
-      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'openh264'
-        language: c++
-        fuzz-seconds: 600
-    - name: Upload Crash
-      uses: actions/upload-artifact@v4
-      if: failure() && steps.build.outcome == 'success'
-      with:
-        name: artifacts
-        path: ./out/artifacts
+  # phasm-stego: the upstream `fuzzing` job is removed on this branch.
+  # Reasons:
+  #   1. It registers as `oss-fuzz-project-name: openh264` — but this is
+  #      our stego-extension fork, not the official OpenH264 oss-fuzz project
+  #      (which is owned by Cisco upstream). Running here would create
+  #      identity confusion / wrong reporting.
+  #   2. The "Upload Crash" step uses `actions/upload-artifact@v4` to publish
+  #      fuzzer crash data. We do not publish ANY artifacts from this fork —
+  #      the phasm-stego branch is source-only; binaries are built by
+  #      downstream consumers (phasmcore + the phasm monorepo) under their
+  #      own patent-compliance posture, never here.
+  # Upstream fuzzing remains in place on the `master` branch (verbatim
+  # mirror of cisco/openh264:master) where it is still semantically valid.

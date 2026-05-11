@@ -1,0 +1,210 @@
+# phasm-stego CI — runs on every push or PR targeting the phasm-stego
+# branch. Verifies:
+#   1. The phasm-stego patches apply cleanly and build on Linux x86_64 +
+#      macOS arm64 with meson+ninja.
+#   2. OpenH264's bundled gtest suite (`meson test`) still passes — our
+#      patches must never regress upstream behavior.
+#   3. Deterministic-output gate: encode the same synthetic YUV twice in
+#      a row with a fixed-QP single-thread configuration and byte-compare
+#      the output bitstreams. They must be identical. This is the
+#      reproducibility property phasm's stego pipeline depends on.
+#
+# What this workflow does NOT do (deliberately, never to be added):
+#   - upload binary artifacts (libopenh264.{so,dylib,dll}, h264enc, h264dec)
+#   - create GitHub Releases or trigger any `release:` events
+#   - register with oss-fuzz or any external binary-distribution service
+#   - cache or restore artifacts that include compiled binaries
+#
+# Patent posture: this fork modifies Cisco OpenH264, which is BSD-2-Clause
+# but subject to Via LA AVC pool patent obligations independent of the
+# software license. Cisco's signed openh264.org binary distribution does
+# NOT cover derivative binaries built from this fork. CI builds here are
+# transient (GitHub-hosted runners garbage-collect them after the job
+# exits) and never reach downstream consumers — the only outputs of this
+# workflow are pass/fail signals.
+
+name: phasm-stego CI
+
+on:
+  push:
+    branches: [phasm-stego]
+  pull_request:
+    branches: [phasm-stego]
+
+# Cancel in-flight runs when a newer commit lands on the same ref.
+concurrency:
+  group: phasm-stego-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            install_cmd: sudo apt-get update -qq && sudo apt-get install -qq nasm meson ninja-build python3
+            ncores_cmd: nproc
+          - os: macos-latest
+            install_cmd: brew install meson ninja nasm
+            ncores_cmd: sysctl -n hw.ncpu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: ${{ matrix.install_cmd }}
+
+      - name: Toolchain versions
+        run: |
+          c++ --version
+          meson --version
+          ninja --version
+          # nasm is unused on macos-arm64 (NEON via gas .S) but present.
+          nasm --version || echo "nasm absent — OK on arm64"
+
+      - name: Configure (meson, _build/)
+        run: meson setup _build --buildtype=release
+
+      - name: Build (ninja)
+        run: ninja -C _build -j $(${{ matrix.ncores_cmd }})
+
+      - name: Bundled gtests (meson test)
+        run: meson test -C _build --print-errorlogs --num-processes 1
+        # --num-processes 1 keeps the test runs deterministic; the test
+        # harness exits non-zero on any gtest failure.
+
+      - name: Deterministic-output gate
+        run: |
+          # Build a tiny C++ harness that encodes a synthetic 320x240
+          # vertical-stripe YUV twice with identical fixed-QP single-thread
+          # CABAC settings, then byte-compares the two output bitstreams.
+          # This is the reproducibility property the phasm stego pipeline
+          # depends on (deterministic cover bytes ⇒ deterministic STC
+          # plan ⇒ deterministic message recovery).
+          cat > /tmp/dgate.cpp <<'CPP'
+          #include "codec_api.h"
+          #include "codec_app_def.h"
+          #include <cstdio>
+          #include <cstdlib>
+          #include <cstring>
+          #include <vector>
+
+          static int encode_once(const std::vector<uint8_t>& y,
+                                 const std::vector<uint8_t>& u,
+                                 const std::vector<uint8_t>& v,
+                                 int width, int height, int n_frames,
+                                 const char* outpath) {
+            ISVCEncoder* enc = nullptr;
+            if (WelsCreateSVCEncoder(&enc) != 0 || !enc) return 1;
+            SEncParamExt p;
+            enc->GetDefaultParams(&p);
+            p.iUsageType = CAMERA_VIDEO_REAL_TIME;
+            p.iPicWidth = width;
+            p.iPicHeight = height;
+            p.fMaxFrameRate = 30.0f;
+            p.iTargetBitrate = 1'000'000;
+            p.iRCMode = RC_OFF_MODE;
+            p.iTemporalLayerNum = 1;
+            p.iSpatialLayerNum = 1;
+            p.uiIntraPeriod = 60;
+            p.iNumRefFrame = 1;
+            p.iEntropyCodingModeFlag = 1;
+            p.iMultipleThreadIdc = 1;
+            p.bEnableSceneChangeDetect = false;
+            p.bEnableBackgroundDetection = false;
+            p.bEnableAdaptiveQuant = false;
+            p.bUseLoadBalancing = false;
+            p.bEnableDenoise = false;
+            p.bEnableFrameSkip = false;
+            p.bEnableLongTermReference = false;
+            p.iComplexityMode = MEDIUM_COMPLEXITY;
+            p.sSpatialLayers[0].iVideoWidth = width;
+            p.sSpatialLayers[0].iVideoHeight = height;
+            p.sSpatialLayers[0].fFrameRate = 30.0f;
+            p.sSpatialLayers[0].iSpatialBitrate = 1'000'000;
+            p.sSpatialLayers[0].uiProfileIdc = PRO_MAIN;
+            p.sSpatialLayers[0].uiLevelIdc = LEVEL_3_0;
+            p.sSpatialLayers[0].iDLayerQp = 18;
+            p.sSpatialLayers[0].sSliceArgument.uiSliceMode = SM_SINGLE_SLICE;
+            if (enc->InitializeExt(&p) != 0) return 2;
+
+            FILE* out = std::fopen(outpath, "wb");
+            if (!out) return 3;
+            std::vector<uint8_t> work_y = y;
+            for (int f = 0; f < n_frames; ++f) {
+              if (f > 0) {
+                // Shift stripes by one column each frame so the P-frame
+                // path actually exercises ME / inter-residual.
+                for (int j = 0; j < height; ++j)
+                  for (int i = 0; i < width; ++i)
+                    work_y[j * width + i] = ((i + f) & 1) ? 235 : 16;
+              }
+              SSourcePicture pic;
+              std::memset(&pic, 0, sizeof(pic));
+              pic.iColorFormat = videoFormatI420;
+              pic.iPicWidth = width;
+              pic.iPicHeight = height;
+              pic.iStride[0] = width;
+              pic.iStride[1] = width / 2;
+              pic.iStride[2] = width / 2;
+              pic.pData[0] = work_y.data();
+              pic.pData[1] = const_cast<uint8_t*>(u.data());
+              pic.pData[2] = const_cast<uint8_t*>(v.data());
+              pic.uiTimeStamp = (long long)f * 33;
+              SFrameBSInfo info; std::memset(&info, 0, sizeof(info));
+              if (enc->EncodeFrame(&pic, &info) != cmResultSuccess) return 4;
+              for (int li = 0; li < info.iLayerNum; ++li) {
+                SLayerBSInfo& layer = info.sLayerInfo[li];
+                int bytes = 0;
+                for (int n = 0; n < layer.iNalCount; ++n)
+                  bytes += layer.pNalLengthInByte[n];
+                std::fwrite(layer.pBsBuf, 1, (size_t)bytes, out);
+              }
+            }
+            std::fclose(out);
+            enc->Uninitialize();
+            WelsDestroySVCEncoder(enc);
+            return 0;
+          }
+
+          int main() {
+            const int W = 320, H = 240, N = 4;
+            std::vector<uint8_t> y(W * H);
+            for (int j = 0; j < H; ++j)
+              for (int i = 0; i < W; ++i)
+                y[j * W + i] = (i & 1) ? 235 : 16;
+            std::vector<uint8_t> u(W/2 * H/2, 128);
+            std::vector<uint8_t> v(W/2 * H/2, 128);
+            if (encode_once(y, u, v, W, H, N, "/tmp/dgate_a.h264") != 0) {
+              std::fprintf(stderr, "first encode failed\n"); return 10;
+            }
+            if (encode_once(y, u, v, W, H, N, "/tmp/dgate_b.h264") != 0) {
+              std::fprintf(stderr, "second encode failed\n"); return 11;
+            }
+            return 0;
+          }
+          CPP
+
+          c++ -std=c++17 -O2 \
+            -I codec/api/wels \
+            /tmp/dgate.cpp \
+            -L _build -lopenh264 \
+            -Wl,-rpath,$PWD/_build \
+            -o /tmp/dgate
+          /tmp/dgate
+
+          # Hard fail if any byte differs. cmp returns 0 on match.
+          if cmp -s /tmp/dgate_a.h264 /tmp/dgate_b.h264; then
+            echo "Deterministic-output gate PASS — $(wc -c </tmp/dgate_a.h264) bytes, byte-identical across runs."
+          else
+            echo "::error::Deterministic-output gate FAILED — encoder produced different bitstreams across two identical runs."
+            cmp /tmp/dgate_a.h264 /tmp/dgate_b.h264 | head -10 || true
+            exit 1
+          fi
+          test -s /tmp/dgate_a.h264 || (echo "::error::Encoded output empty" && exit 1)
+
+      # Intentionally no upload-artifact step. The compiled artifacts are
+      # ephemeral; the only signal we carry out of this job is the
+      # green/red status badge. See header comment for patent posture.
