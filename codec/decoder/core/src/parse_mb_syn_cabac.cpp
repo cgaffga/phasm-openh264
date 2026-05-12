@@ -1252,6 +1252,25 @@ int32_t ParseMvdInfoCabac (PWelsDecoderContext pCtx, PWelsNeighAvail pNeighAvail
     if (uiCode) {
       iMvdVal = -iMvdVal;
     }
+
+    // phasm-stego B.9.2.4: MvdSuffixLsb hook fires when |MVD| >= 9
+    // — that's the threshold at which the UEG3 escape branch activates
+    // inside DecodeUEGMvCabac and a binary suffix is emitted/parsed.
+    // The phasm convention (matching the encoder's
+    // apply_mvd_suffix_lsb) is to record `(|MVD| - 9) & 1` — i.e. the
+    // LSB of the EG3 suffix value, which equals the LSB of the
+    // residual magnitude beyond the unary cap.
+    int32_t phasm_abs_mvd = (iMvdVal < 0) ? -(int32_t)iMvdVal : (int32_t)iMvdVal;
+    if (phasm_abs_mvd >= 9) {
+      const int32_t phasm_lsb = (phasm_abs_mvd - 9) & 1;
+      phasm_dec_emit_mvd_suffix_lsb ((uint16_t) pCtx->pCurDqLayer->iMbX,
+                                     (uint16_t) pCtx->pCurDqLayer->iMbY,
+                                     (uint8_t)  iListIdx,
+                                     (uint8_t)  (index & 0x0F),
+                                     (uint8_t)  iMvComp,
+                                     0xff /* ref_idx */,
+                                     phasm_lsb);
+    }
   } else {
     iMvdVal = 0;
   }
