@@ -16,6 +16,7 @@
 
 #include "wels_stego.h"
 #include "wels_stego_internal.h"
+#include "wels_stego_dec_helpers.h"
 
 #include <cstddef>
 #include <cstdlib>
@@ -226,6 +227,132 @@ int16_t apply_mvd_suffix_lsb(int16_t mv_component, int16_t mvp_component,
 }  // namespace
 
 extern "C" {
+
+// =====================================================================
+// Phase B.9.2.1: Decoder-side emit helpers.
+//
+// Declared in codec/common/inc/wels_stego_dec_helpers.h so decoder TUs
+// can include + call. Implementations live here because they need
+// access to file-scope globals (g_phasm_callbacks, g_phasm_user_data,
+// g_phasm_frame_num). Resolved at link time via libopenh264's
+// link_whole(libencoder + libdecoder + ...).
+//
+// These helpers are pure observation — no encoder-state modification.
+// Each is a no-op when no dec_post_read callback is registered. The hot
+// path is one nullptr check + one PhasmStegoPos stack alloc + dispatch.
+//
+// Phase B.9.2.2-.5 insert calls into parse_mb_syn_cabac.cpp.
+// Phase B.9.2.1 (this commit) ships infrastructure only — no decoder TU
+// references these helpers yet, but the symbols are present so future
+// phases compile cleanly and the encoder TU continues to link.
+// =====================================================================
+
+void phasm_dec_emit_coeff_sign(uint16_t mb_x, uint16_t mb_y,
+                               uint8_t  block_cat,
+                               uint8_t  sub_block,
+                               uint8_t  coeff_idx,
+                               int32_t  sign_bit) {
+  PhasmStegoDecPostReadFn cb = g_phasm_callbacks.dec_post_read;
+  if (cb == nullptr) return;
+
+  PhasmStegoPos pos;
+  pos.frame_num     = g_phasm_frame_num;
+  pos.mb_x          = mb_x;
+  pos.mb_y          = mb_y;
+  pos.domain        = (uint8_t)PHASM_DOMAIN_COEFF_SIGN;
+  pos.partition_idx = 0;
+  pos.sub_block     = sub_block;
+  pos.coeff_idx     = coeff_idx;
+  pos.block_cat     = block_cat;
+  pos.ref_idx       = 0xff;
+  pos.mv_component  = 0xff;
+  pos._reserved     = 0;
+
+  cb(&pos, sign_bit, g_phasm_user_data);
+}
+
+void phasm_dec_emit_coeff_suffix_lsb(uint16_t mb_x, uint16_t mb_y,
+                                     uint8_t  block_cat,
+                                     uint8_t  sub_block,
+                                     uint8_t  coeff_idx,
+                                     int32_t  lsb_bit) {
+  PhasmStegoDecPostReadFn cb = g_phasm_callbacks.dec_post_read;
+  if (cb == nullptr) return;
+
+  PhasmStegoPos pos;
+  pos.frame_num     = g_phasm_frame_num;
+  pos.mb_x          = mb_x;
+  pos.mb_y          = mb_y;
+  pos.domain        = (uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB;
+  pos.partition_idx = 0;
+  pos.sub_block     = sub_block;
+  pos.coeff_idx     = coeff_idx;
+  pos.block_cat     = block_cat;
+  pos.ref_idx       = 0xff;
+  pos.mv_component  = 0xff;
+  pos._reserved     = 0;
+
+  cb(&pos, lsb_bit, g_phasm_user_data);
+}
+
+void phasm_dec_emit_mvd_sign(uint16_t mb_x, uint16_t mb_y,
+                             uint8_t  list,
+                             uint8_t  partition_idx,
+                             uint8_t  mv_component,
+                             uint8_t  ref_idx,
+                             int32_t  sign_bit) {
+  PhasmStegoDecPostReadFn cb = g_phasm_callbacks.dec_post_read;
+  if (cb == nullptr) return;
+
+  /* list (L0=0, L1=1) is encoded into the high nibble of partition_idx
+   * to match the encoder-side convention (the consumer's translation
+   * function reads partition_idx and demuxes). For ABI 1.1.0 there is
+   * no dedicated list field on PhasmStegoPos; reusing partition_idx's
+   * top bit is the same convention encoder hooks H1-H7 already use. */
+  PhasmStegoPos pos;
+  pos.frame_num     = g_phasm_frame_num;
+  pos.mb_x          = mb_x;
+  pos.mb_y          = mb_y;
+  pos.domain        = (uint8_t)PHASM_DOMAIN_MVD_SIGN;
+  pos.partition_idx = (uint8_t)((list << 4) | (partition_idx & 0x0F));
+  pos.sub_block     = 0xff;
+  pos.coeff_idx     = 0xff;
+  pos.block_cat     = 0xff;
+  pos.ref_idx       = ref_idx;
+  pos.mv_component  = mv_component;
+  pos._reserved     = 0;
+
+  cb(&pos, sign_bit, g_phasm_user_data);
+}
+
+void phasm_dec_emit_mvd_suffix_lsb(uint16_t mb_x, uint16_t mb_y,
+                                   uint8_t  list,
+                                   uint8_t  partition_idx,
+                                   uint8_t  mv_component,
+                                   uint8_t  ref_idx,
+                                   int32_t  lsb_bit) {
+  PhasmStegoDecPostReadFn cb = g_phasm_callbacks.dec_post_read;
+  if (cb == nullptr) return;
+
+  PhasmStegoPos pos;
+  pos.frame_num     = g_phasm_frame_num;
+  pos.mb_x          = mb_x;
+  pos.mb_y          = mb_y;
+  pos.domain        = (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB;
+  pos.partition_idx = (uint8_t)((list << 4) | (partition_idx & 0x0F));
+  pos.sub_block     = 0xff;
+  pos.coeff_idx     = 0xff;
+  pos.block_cat     = 0xff;
+  pos.ref_idx       = ref_idx;
+  pos.mv_component  = mv_component;
+  pos._reserved     = 0;
+
+  cb(&pos, lsb_bit, g_phasm_user_data);
+}
+
+// =====================================================================
+// Phase A.5 Stage 0+ encoder-side helpers (existing).
+// =====================================================================
 
 int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                             uint8_t sub_block,
