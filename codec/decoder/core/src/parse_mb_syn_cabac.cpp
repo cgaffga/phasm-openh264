@@ -1220,6 +1220,35 @@ int32_t ParseMvdInfoCabac (PWelsDecoderContext pCtx, PWelsNeighAvail pNeighAvail
     WELS_READ_VERIFY (DecodeUEGMvCabac (pCtx->pCabacDecEngine, pBinCtx + 3, 3, uiCode));
     iMvdVal = (int16_t) (uiCode + 1);
     WELS_READ_VERIFY (DecodeBypassCabac (pCtx->pCabacDecEngine, uiCode));
+
+    // phasm-stego B.9.2.3: MvdSignBypass hook fires after the sign
+    // bypass bit is parsed, but ONLY when |MVD| > 0 (i.e. inside the
+    // `if (uiCode)` branch that emits both magnitude + sign). uiCode
+    // here is the raw sign bit: 0 = positive, 1 = negative.
+    //
+    // Position fields:
+    //   - mb_x/mb_y from pCtx (current MB scan position)
+    //   - list      = iListIdx (LIST_0 or LIST_1)
+    //   - part_idx  = `index` from the caller (decoder's cache-scan
+    //                 partition seed: 0 for P_16x16, 0/8 for 16x8,
+    //                 0/4 for 8x16, 0/4/8/12 for 8x8). The consumer
+    //                 side translates this to the canonical phasm
+    //                 partition_idx 0..3 per mb_type.
+    //   - mv_comp   = iMvComp (0 = X, 1 = Y)
+    //   - ref_idx   = 0xff (decoder has it via pRefIndex but the
+    //                 partition-to-cache-slot mapping varies per
+    //                 mb_type; defer to consumer translation if
+    //                 ref-idx-keyed bins are needed for stego).
+    //
+    // No-op when no dec_post_read callback is registered.
+    phasm_dec_emit_mvd_sign ((uint16_t) pCtx->pCurDqLayer->iMbX,
+                             (uint16_t) pCtx->pCurDqLayer->iMbY,
+                             (uint8_t)  iListIdx,
+                             (uint8_t)  (index & 0x0F),
+                             (uint8_t)  iMvComp,
+                             0xff /* ref_idx */,
+                             (int32_t)  uiCode);
+
     if (uiCode) {
       iMvdVal = -iMvdVal;
     }
