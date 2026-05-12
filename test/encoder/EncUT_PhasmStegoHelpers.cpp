@@ -423,3 +423,198 @@ TEST(PhasmMvdCollision, XDiffersFalse) {
 TEST(PhasmMvdCollision, YDiffersFalse) {
   EXPECT_EQ(0, phasm_mvd_would_collide_with_pskip(4, 7, 4, 8));
 }
+
+// =====================================================================
+// Dual-recon writeback helper (Phase C.8.2+)
+// =====================================================================
+
+namespace {
+
+// Capture buffer for the dual_recon_observe callback. Records the last
+// fire's geometry + a hash of the two pixel blocks so tests can verify
+// the callback fired with consistent state.
+struct DualReconCapture {
+  uint32_t frame_num;
+  uint16_t mb_x;
+  uint16_t mb_y;
+  uint8_t  plane;
+  int32_t  pixel_x;
+  int32_t  pixel_y;
+  int32_t  block_w;
+  int32_t  block_h;
+  int32_t  src_stride;
+  uint32_t clean_hash;
+  uint32_t stego_hash;
+  int      fire_count;
+};
+
+DualReconCapture g_capture = {};
+
+extern "C" void mock_dual_recon_cb(uint32_t frame_num,
+                                   uint16_t mb_x, uint16_t mb_y,
+                                   uint8_t  plane,
+                                   int32_t  pixel_x, int32_t pixel_y,
+                                   int32_t  block_w, int32_t block_h,
+                                   const uint8_t* clean_pixels,
+                                   const uint8_t* stego_pixels,
+                                   int32_t  src_stride,
+                                   void* /*user_data*/) {
+  g_capture.frame_num = frame_num;
+  g_capture.mb_x      = mb_x;
+  g_capture.mb_y      = mb_y;
+  g_capture.plane     = plane;
+  g_capture.pixel_x   = pixel_x;
+  g_capture.pixel_y   = pixel_y;
+  g_capture.block_w   = block_w;
+  g_capture.block_h   = block_h;
+  g_capture.src_stride= src_stride;
+  // FNV-1a 32-bit over each block, row-by-row.
+  uint32_t h_clean = 2166136261u;
+  uint32_t h_stego = 2166136261u;
+  for (int32_t y = 0; y < block_h; ++y) {
+    const uint8_t* rc = clean_pixels + (size_t)y * (size_t)src_stride;
+    const uint8_t* rs = stego_pixels + (size_t)y * (size_t)src_stride;
+    for (int32_t x = 0; x < block_w; ++x) {
+      h_clean = (h_clean ^ rc[x]) * 16777619u;
+      h_stego = (h_stego ^ rs[x]) * 16777619u;
+    }
+  }
+  g_capture.clean_hash = h_clean;
+  g_capture.stego_hash = h_stego;
+  g_capture.fire_count++;
+}
+
+void ResetDualReconCapture() {
+  std::memset(&g_capture, 0, sizeof(g_capture));
+}
+
+}  // namespace
+
+TEST(PhasmDualRecon, WritebackCopiesBothBuffersWhenSet) {
+  // Pre-fill destination buffers with sentinel byte so we can detect
+  // whether the writeback actually copied.
+  constexpr int W = 16, H = 16, STRIDE = 32;
+  uint8_t clean_dst[STRIDE * H];
+  uint8_t stego_dst[STRIDE * H];
+  std::memset(clean_dst, 0x55, sizeof(clean_dst));
+  std::memset(stego_dst, 0x55, sizeof(stego_dst));
+
+  uint8_t clean_src[W * H];
+  uint8_t stego_src[W * H];
+  for (int i = 0; i < W * H; ++i) {
+    clean_src[i] = (uint8_t)(i & 0xFF);
+    stego_src[i] = (uint8_t)((i + 0x80) & 0xFF);
+  }
+
+  phasm_dual_recon_writeback(/*mb_x*/ 0, /*mb_y*/ 0, /*plane*/ 0,
+                             /*pixel_x*/ 0, /*pixel_y*/ 0,
+                             /*block_w*/ W, /*block_h*/ H,
+                             clean_dst, stego_dst, /*dst_stride*/ STRIDE,
+                             clean_src, stego_src, /*src_stride*/ W);
+
+  // Verify copy happened on both buffers.
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      EXPECT_EQ(clean_src[y * W + x], clean_dst[y * STRIDE + x])
+        << "clean mismatch at (" << x << "," << y << ")";
+      EXPECT_EQ(stego_src[y * W + x], stego_dst[y * STRIDE + x])
+        << "stego mismatch at (" << x << "," << y << ")";
+    }
+    // Out-of-block padding should still be sentinel.
+    EXPECT_EQ(0x55, clean_dst[y * STRIDE + W]);
+    EXPECT_EQ(0x55, stego_dst[y * STRIDE + W]);
+  }
+}
+
+TEST(PhasmDualRecon, WritebackSkipsStegoWhenDstNull) {
+  constexpr int W = 4, H = 4, STRIDE = 8;
+  uint8_t clean_dst[STRIDE * H];
+  std::memset(clean_dst, 0xAA, sizeof(clean_dst));
+
+  uint8_t clean_src[W * H];
+  uint8_t stego_src[W * H];
+  for (int i = 0; i < W * H; ++i) {
+    clean_src[i] = (uint8_t)(i + 1);
+    stego_src[i] = (uint8_t)(i + 0x40);
+  }
+
+  // stego_dst = nullptr → only clean copy fires.
+  phasm_dual_recon_writeback(0, 0, 0, 0, 0, W, H,
+                             clean_dst, nullptr, STRIDE,
+                             clean_src, stego_src, W);
+
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      EXPECT_EQ(clean_src[y * W + x], clean_dst[y * STRIDE + x]);
+    }
+  }
+}
+
+TEST(PhasmDualRecon, ObserveCallbackFires) {
+  ResetDualReconCapture();
+
+  PhasmStegoCallbacks cbs;
+  std::memset(&cbs, 0, sizeof(cbs));
+  cbs.struct_size       = sizeof(cbs);
+  cbs.dual_recon_observe= mock_dual_recon_cb;
+  ASSERT_EQ(0, WelsRegisterPhasmStegoCallbacks(&cbs, nullptr));
+
+  WelsStegoSetFrameNum(42);
+
+  constexpr int W = 8, H = 8, STRIDE = 16;
+  uint8_t clean_dst[STRIDE * H];
+  uint8_t stego_dst[STRIDE * H];
+  std::memset(clean_dst, 0, sizeof(clean_dst));
+  std::memset(stego_dst, 0, sizeof(stego_dst));
+
+  uint8_t clean_src[W * H];
+  uint8_t stego_src[W * H];
+  for (int i = 0; i < W * H; ++i) {
+    clean_src[i] = (uint8_t)(i * 2);
+    stego_src[i] = (uint8_t)(i * 2 + 1);
+  }
+
+  phasm_dual_recon_writeback(/*mb_x*/ 11, /*mb_y*/ 22, /*plane*/ 1,
+                             /*pixel_x*/ 100, /*pixel_y*/ 200,
+                             W, H,
+                             clean_dst, stego_dst, STRIDE,
+                             clean_src, stego_src, W);
+
+  EXPECT_EQ(1, g_capture.fire_count);
+  EXPECT_EQ(42u, g_capture.frame_num);
+  EXPECT_EQ(11, g_capture.mb_x);
+  EXPECT_EQ(22, g_capture.mb_y);
+  EXPECT_EQ(1, g_capture.plane);
+  EXPECT_EQ(100, g_capture.pixel_x);
+  EXPECT_EQ(200, g_capture.pixel_y);
+  EXPECT_EQ(W, g_capture.block_w);
+  EXPECT_EQ(H, g_capture.block_h);
+  // Clean and stego hashes differ — the callback got distinct buffers.
+  EXPECT_NE(g_capture.clean_hash, g_capture.stego_hash);
+
+  WelsRegisterPhasmStegoCallbacks(nullptr, nullptr);
+}
+
+TEST(PhasmDualRecon, ObserveCallbackOptional) {
+  // With no callback registered, writeback must still do the memcpys
+  // and complete without crashing.
+  PhasmStegoCallbacks cbs;
+  std::memset(&cbs, 0, sizeof(cbs));
+  cbs.struct_size = sizeof(cbs);
+  ASSERT_EQ(0, WelsRegisterPhasmStegoCallbacks(&cbs, nullptr));
+
+  uint8_t dst_c[64], dst_s[64];
+  std::memset(dst_c, 0, sizeof(dst_c));
+  std::memset(dst_s, 0, sizeof(dst_s));
+  uint8_t src_c[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  uint8_t src_s[16] = {16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+
+  phasm_dual_recon_writeback(0, 0, 0, 0, 0, 4, 4,
+                             dst_c, dst_s, 8,
+                             src_c, src_s, 4);
+
+  EXPECT_EQ(1, dst_c[0]);
+  EXPECT_EQ(16, dst_s[0]);
+
+  WelsRegisterPhasmStegoCallbacks(nullptr, nullptr);
+}

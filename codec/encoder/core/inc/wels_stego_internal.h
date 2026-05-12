@@ -70,6 +70,7 @@ uint32_t                PhasmStegoGetFrameNum(void);
 PhasmStegoEncPreEmitFn  PhasmStegoGetEncPreEmit(void);
 PhasmStegoDecPostReadFn PhasmStegoGetDecPostRead(void);
 PhasmStegoMdCostFn      PhasmStegoGetMdCostCapture(void);
+PhasmStegoDualReconFn   PhasmStegoGetDualReconObserve(void);
 void*                   PhasmStegoGetUserData(void);
 
 /* ---------------------------------------------------------------------
@@ -165,6 +166,60 @@ int /*bool*/ phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
  * ------------------------------------------------------------------ */
 void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
                         uint32_t internal_mb_type, uint8_t cbp);
+
+/* ---------------------------------------------------------------------
+ * phasm_dual_recon_writeback (Phase C.8.2+)
+ *
+ * Single entry point called by C.8.3-8 per-mode recon hook bodies
+ * once they have computed BOTH the clean and stego pixel blocks for a
+ * given reconstruction commit. Performs two memcpys:
+ *
+ *   memcpy clean_pixels -> clean_dst[pixel_y*dst_stride + pixel_x]
+ *   memcpy stego_pixels -> stego_dst[pixel_y*dst_stride + pixel_x]
+ *
+ * (row-by-row, block_h rows of block_w bytes, hopping `dst_stride`
+ * between row starts on the dest side and `src_stride` on the source
+ * side). After both copies complete, fires the registered
+ * `dual_recon_observe` callback if one is set; pure no-op otherwise.
+ *
+ * The caller is responsible for resolving `clean_dst` / `stego_dst`
+ * from the encoder context: typically
+ *
+ *   clean_dst = pCurDq->pCsData[plane]              (aliases pDecPic)
+ *   stego_dst = pCurDq->pVisualRecPic->pData[plane]
+ *   dst_stride= pCurDq->iCsStride[plane]            (== pVisualRecPic
+ *                                                    line stride at
+ *                                                    same width)
+ *
+ * `pixel_x` / `pixel_y` are pixel coordinates in the plane (frame
+ * coordinates, not MB-local). The caller derives them from
+ * `mb_x * (16 >> shift_x)` + per-block offset, etc.
+ *
+ * `plane`: 0=Y, 1=U, 2=V. Used only for the observe callback
+ * dispatch; the helper itself is plane-agnostic and operates purely
+ * on byte arrays.
+ *
+ * Safe to call with stego_dst==NULL or pVisualRecPic unallocated: the
+ * helper skips the stego memcpy in that case (so callers don't have
+ * to gate on stego-active state). The clean memcpy always runs.
+ *
+ * Inlining cost: ~12 LOC body, two memcpy loops + null-check +
+ * callback dispatch. Hot path with no callback is ~5 instructions
+ * beyond the memcpys themselves.
+ * ------------------------------------------------------------------ */
+void phasm_dual_recon_writeback(uint16_t mb_x,
+                                uint16_t mb_y,
+                                uint8_t  plane,
+                                int32_t  pixel_x,
+                                int32_t  pixel_y,
+                                int32_t  block_w,
+                                int32_t  block_h,
+                                uint8_t* clean_dst,
+                                uint8_t* stego_dst,
+                                int32_t  dst_stride,
+                                const uint8_t* clean_pixels,
+                                const uint8_t* stego_pixels,
+                                int32_t  src_stride);
 
 #ifdef __cplusplus
 }  /* extern "C" */

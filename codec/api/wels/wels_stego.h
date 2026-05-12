@@ -5,7 +5,7 @@
 //
 // This header is the public surface phasm.app uses to instrument an
 // OpenH264 encoder + decoder for steganographic bit override + cover
-// state capture. Three callback families:
+// state capture. Four callback families:
 //
 //   1. Encoder pre-emit hook (4 stego domains).
 //      Fires after each candidate bin's value is decided but BEFORE the
@@ -26,6 +26,17 @@
 //      partition layout. Used by phasm's STC + cascade-safety planner to
 //      pick positions across the encode that minimize visible distortion
 //      while satisfying the message-bit count.
+//
+//   4. Dual-recon observation hook (per-block, Phase C.8.2+).
+//      Fires from within the C.8.3-8 per-mode recon paths AFTER the
+//      encoder has committed BOTH the clean reconstruction (into the
+//      reference frame buffer pDecPic) AND the stego-mirrored
+//      reconstruction (into pVisualRecPic). Pure observation; carries
+//      pointers to both pixel blocks for cascade-verify, PSNR, and
+//      visual-debug consumers. Default behaviour with no callback
+//      registered: dual-recon still happens internally (memcpy clean →
+//      pDecPic, stego → pVisualRecPic); only the observe-side notify is
+//      skipped.
 //
 // All callbacks are optional. Setting a callback pointer to NULL or
 // leaving the field zero-initialized disables that hook with zero
@@ -225,6 +236,51 @@ typedef void (*PhasmStegoMdCostFn)(const PhasmStegoMdCost* cost,
                                    void* user_data);
 
 /* ---------------------------------------------------------------------
+ * 6.5 Dual-recon observation callback (Phase C.8.2+)
+ *
+ * Fires from the internal `phasm_dual_recon_writeback` helper AFTER it
+ * has committed clean pixels to pDecPic AND stego pixels to
+ * pVisualRecPic. Pure observation; no return value.
+ *
+ * Parameters:
+ *   frame_num     : current frame number set via WelsStegoSetFrameNum
+ *   mb_x, mb_y    : macroblock coordinates of the containing MB
+ *   plane         : 0 = luma (Y), 1 = chroma U (Cb), 2 = chroma V (Cr)
+ *   pixel_x       : pixel x-offset within the frame plane (in pixels)
+ *   pixel_y       : pixel y-offset within the frame plane
+ *   block_w       : width of the committed block (4, 8, or 16 in v1.0)
+ *   block_h       : height of the committed block
+ *   clean_pixels  : pointer to the clean (un-flipped) recon block,
+ *                   `block_w * block_h` bytes, rows packed with
+ *                   `src_stride` between row starts. Valid for the
+ *                   duration of the call only; copy if needed beyond.
+ *   stego_pixels  : pointer to the stego-flipped recon block; same
+ *                   layout, also valid for the call duration only.
+ *   src_stride    : byte distance between consecutive rows of both
+ *                   `clean_pixels` and `stego_pixels`. Caller chooses;
+ *                   typically equals block_w for contiguous scratch.
+ *   user_data     : opaque pointer registered alongside the callbacks
+ *
+ * Used by phasm tests + cascade-verify orchestrator to diff clean vs
+ * stego per block, compute PSNR, and dump per-MB stego deltas. In
+ * production builds the callback is null and the helper does the
+ * memcpys alone with no observation overhead.
+ * ------------------------------------------------------------------ */
+
+typedef void (*PhasmStegoDualReconFn)(uint32_t frame_num,
+                                      uint16_t mb_x,
+                                      uint16_t mb_y,
+                                      uint8_t  plane,
+                                      int32_t  pixel_x,
+                                      int32_t  pixel_y,
+                                      int32_t  block_w,
+                                      int32_t  block_h,
+                                      const uint8_t* clean_pixels,
+                                      const uint8_t* stego_pixels,
+                                      int32_t  src_stride,
+                                      void*    user_data);
+
+/* ---------------------------------------------------------------------
  * 7. Callback table
  *
  * Caller fills in only the callbacks it cares about; NULL means "no
@@ -238,6 +294,7 @@ typedef struct PhasmStegoCallbacks {
   PhasmStegoEncPreEmitFn   enc_pre_emit;      /* encoder bin pre-emit */
   PhasmStegoDecPostReadFn  dec_post_read;     /* decoder bin post-read */
   PhasmStegoMdCostFn       md_cost_capture;   /* per-MB cost capture */
+  PhasmStegoDualReconFn    dual_recon_observe;/* per-block dual-recon observe (ABI 1.2.0+) */
 } PhasmStegoCallbacks;
 
 /* ---------------------------------------------------------------------
@@ -275,11 +332,14 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
  * breaking changes; MINOR on additive (new callback fields appended
  * to the end of structs); PATCH on doc-only changes.
  *
- * Current version: 1.1.0 (0x010100). 1.1.0 wires `md_cost_capture` in
- * the encoder (1.0.0 had it in the API but never fired it).
+ * Current version: 1.2.0 (0x010200). 1.2.0 adds the
+ * `dual_recon_observe` callback (Phase C.8.2) for per-block visibility
+ * into the clean-vs-stego reconstruction pair the encoder commits to
+ * pDecPic + pVisualRecPic respectively. 1.1.0 wired `md_cost_capture`;
+ * 1.0.0 shipped the original 3 callbacks.
  * ------------------------------------------------------------------ */
 
-#define PHASM_STEGO_ABI_VERSION 0x010100u
+#define PHASM_STEGO_ABI_VERSION 0x010200u
 uint32_t WelsStegoAbiVersion(void);
 
 #ifdef __cplusplus

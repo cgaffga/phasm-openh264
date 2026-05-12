@@ -27,7 +27,7 @@
 namespace {
 
 // Process-global callback state. NULL pointers = hook disabled.
-PhasmStegoCallbacks g_phasm_callbacks = { 0, nullptr, nullptr, nullptr };
+PhasmStegoCallbacks g_phasm_callbacks = { 0, nullptr, nullptr, nullptr, nullptr };
 void*               g_phasm_user_data = nullptr;
 
 // Per-frame state. Caller sets via WelsStegoSetFrameNum at the start
@@ -45,10 +45,11 @@ extern "C" {
 int WelsRegisterPhasmStegoCallbacks(const PhasmStegoCallbacks* callbacks,
                                     void* user_data) {
   if (callbacks == nullptr) {
-    g_phasm_callbacks.struct_size     = 0;
-    g_phasm_callbacks.enc_pre_emit    = nullptr;
-    g_phasm_callbacks.dec_post_read   = nullptr;
-    g_phasm_callbacks.md_cost_capture = nullptr;
+    g_phasm_callbacks.struct_size       = 0;
+    g_phasm_callbacks.enc_pre_emit      = nullptr;
+    g_phasm_callbacks.dec_post_read     = nullptr;
+    g_phasm_callbacks.md_cost_capture   = nullptr;
+    g_phasm_callbacks.dual_recon_observe= nullptr;
     g_phasm_user_data = nullptr;
     return 0;
   }
@@ -62,10 +63,11 @@ int WelsRegisterPhasmStegoCallbacks(const PhasmStegoCallbacks* callbacks,
   }
 
   std::memset(&g_phasm_callbacks, 0, sizeof(g_phasm_callbacks));
-  g_phasm_callbacks.struct_size     = sizeof(PhasmStegoCallbacks);
-  g_phasm_callbacks.enc_pre_emit    = callbacks->enc_pre_emit;
-  g_phasm_callbacks.dec_post_read   = callbacks->dec_post_read;
-  g_phasm_callbacks.md_cost_capture = callbacks->md_cost_capture;
+  g_phasm_callbacks.struct_size       = sizeof(PhasmStegoCallbacks);
+  g_phasm_callbacks.enc_pre_emit      = callbacks->enc_pre_emit;
+  g_phasm_callbacks.dec_post_read     = callbacks->dec_post_read;
+  g_phasm_callbacks.md_cost_capture   = callbacks->md_cost_capture;
+  g_phasm_callbacks.dual_recon_observe= callbacks->dual_recon_observe;
   g_phasm_user_data = user_data;
   return 0;
 }
@@ -98,8 +100,74 @@ PhasmStegoMdCostFn PhasmStegoGetMdCostCapture(void) {
   return g_phasm_callbacks.md_cost_capture;
 }
 
+PhasmStegoDualReconFn PhasmStegoGetDualReconObserve(void) {
+  return g_phasm_callbacks.dual_recon_observe;
+}
+
 void* PhasmStegoGetUserData(void) {
   return g_phasm_user_data;
+}
+
+// ---------------------------------------------------------------------
+// phasm_dual_recon_writeback — internal helper (Phase C.8.2+)
+//
+// Defined here rather than in wels_stego.cpp (libencoder) so the
+// decoder side can also call it without dragging the encoder library
+// into the link. The helper is plane/buffer-agnostic; it operates on
+// raw byte pointers + strides supplied by the caller.
+// ---------------------------------------------------------------------
+void phasm_dual_recon_writeback(uint16_t mb_x,
+                                uint16_t mb_y,
+                                uint8_t  plane,
+                                int32_t  pixel_x,
+                                int32_t  pixel_y,
+                                int32_t  block_w,
+                                int32_t  block_h,
+                                uint8_t* clean_dst,
+                                uint8_t* stego_dst,
+                                int32_t  dst_stride,
+                                const uint8_t* clean_pixels,
+                                const uint8_t* stego_pixels,
+                                int32_t  src_stride) {
+  // Guard nonsensical geometry: zero-size or negative block is a no-op.
+  if (block_w <= 0 || block_h <= 0) return;
+
+  // Clean copy: always required. clean_dst NULL is a caller bug; we
+  // accept it gracefully (skip rather than crash) for defensive purposes
+  // — but in normal operation pCsData[plane] is always non-NULL once
+  // WelsInitCurrentLayer runs.
+  if (clean_dst != nullptr && clean_pixels != nullptr) {
+    uint8_t*       d = clean_dst + (size_t)pixel_y * (size_t)dst_stride + (size_t)pixel_x;
+    const uint8_t* s = clean_pixels;
+    for (int32_t y = 0; y < block_h; ++y) {
+      std::memcpy(d, s, (size_t)block_w);
+      d += dst_stride;
+      s += src_stride;
+    }
+  }
+
+  // Stego mirror copy: optional. Caller may pass stego_dst=NULL when
+  // pVisualRecPic isn't allocated (defensive in C.8.1 builds before any
+  // dual-write hook fires). Same for stego_pixels.
+  if (stego_dst != nullptr && stego_pixels != nullptr) {
+    uint8_t*       d = stego_dst + (size_t)pixel_y * (size_t)dst_stride + (size_t)pixel_x;
+    const uint8_t* s = stego_pixels;
+    for (int32_t y = 0; y < block_h; ++y) {
+      std::memcpy(d, s, (size_t)block_w);
+      d += dst_stride;
+      s += src_stride;
+    }
+  }
+
+  // Observe-side dispatch: pure no-op when no callback registered. Fires
+  // even if either dst pointer was NULL (caller still wanted the
+  // pre-commit pixel snapshot reported).
+  PhasmStegoDualReconFn cb = g_phasm_callbacks.dual_recon_observe;
+  if (cb != nullptr && clean_pixels != nullptr && stego_pixels != nullptr) {
+    cb(g_phasm_frame_num, mb_x, mb_y, plane, pixel_x, pixel_y,
+       block_w, block_h, clean_pixels, stego_pixels, src_stride,
+       g_phasm_user_data);
+  }
 }
 
 uint32_t PhasmStegoGetFrameNum(void) {
