@@ -111,7 +111,7 @@ PhasmMvHookCtx MakeBaseMvCtx(int16_t* mvx, int16_t* mvy) {
 
 TEST(PhasmStegoAbi, VersionNotZero) {
   EXPECT_NE(0u, WelsStegoAbiVersion());
-  EXPECT_EQ(0x010000u, WelsStegoAbiVersion());
+  EXPECT_EQ(PHASM_STEGO_ABI_VERSION, WelsStegoAbiVersion());
 }
 
 TEST(PhasmStegoAbi, RegisterAndReset) {
