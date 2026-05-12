@@ -69,7 +69,12 @@ int32_t ParseCbfInfoCabac (PWelsNeighAvail pNeighAvail, uint8_t* pNzcCache, int3
                            PWelsDecoderContext pCtx, uint32_t& uiCbpBit);
 int32_t ParseSignificantMapCabac (int32_t* pSignificantMap, int32_t iResProperty, PWelsDecoderContext pCtx,
                                   uint32_t& uiBinVal);
-int32_t ParseSignificantCoeffCabac (int32_t* significant, int32_t iResProperty, PWelsDecoderContext pCtx);
+// phasm-stego B.9.2.2: extra `iBlockIdx` parameter threads the 4x4
+// sub-block index (or chroma encoded form 16+(plane<<2)[+block_idx])
+// from the caller so the decoder dec_post_read hook can record
+// per-position metadata that matches the encoder PhasmStegoPos.
+int32_t ParseSignificantCoeffCabac (int32_t* significant, int32_t iResProperty, PWelsDecoderContext pCtx,
+                                    int32_t iBlockIdx);
 int32_t ParseResidualBlockCabac (PWelsNeighAvail pNeighAvail, uint8_t* pNonZeroCountCache, SBitStringAux* pBsAux,
                                  int32_t index, int32_t iMaxNumCoeff, const uint8_t* pScanTable, int32_t iResProperty, int16_t* sTCoeff, uint8_t uiQp,
                                  PWelsDecoderContext pCtx);

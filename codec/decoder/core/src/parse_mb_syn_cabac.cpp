@@ -36,6 +36,51 @@
 #include "error_code.h"
 #include <stdio.h>
 
+// phasm-stego B.9.2.2: decoder-side dec_post_read emit helpers. See
+// codec/common/inc/wels_stego_dec_helpers.h. The CoeffSign hook fires
+// after each non-zero coefficient's sign bypass bit is parsed inside
+// ParseSignificantCoeffCabac.
+#include "wels_stego_dec_helpers.h"
+
+namespace {
+
+// Map OpenH264 decoder iResProperty (wels_common_basis.h:70-87) to the
+// canonical phasm block_cat enum (0..5) shared with the encoder side
+// via PhasmStegoPos.block_cat. Values match ECtxBlockCat from the
+// encoder TU. Phasm consumer (Rust translation in core-openh264-sys)
+// reads this byte to demux per-domain semantics.
+//
+// Returns 0xff for any iResProperty the encoder doesn't emit (e.g. the
+// LUMA_DC_AC family without intra/inter qualifier; OpenH264 always
+// qualifies these via GetMbResProperty before reaching the parse
+// site, but we guard defensively).
+static inline uint8_t phasm_map_res_property_to_block_cat (int32_t iResProperty) {
+  switch (iResProperty) {
+    case I16_LUMA_DC:                       return 0;  // LumaDcIntra16x16
+    case I16_LUMA_AC:                       return 1;  // Luma4x4 (I16 AC)
+    case LUMA_DC_AC_INTRA:
+    case LUMA_DC_AC_INTER:
+    case LUMA_DC_AC:                        return 2;  // Luma4x4
+    case CHROMA_DC_U:
+    case CHROMA_DC_V:
+    case CHROMA_DC_U_INTER:
+    case CHROMA_DC_V_INTER:
+    case CHROMA_DC:                         return 3;  // ChromaDc
+    case CHROMA_AC_U:
+    case CHROMA_AC_V:
+    case CHROMA_AC_U_INTER:
+    case CHROMA_AC_V_INTER:
+    case CHROMA_AC:                         return 4;  // ChromaAc
+    case LUMA_DC_AC_INTRA_8:
+    case LUMA_DC_AC_INTER_8:
+    case LUMA_DC_AC_8:                      return 5;  // Luma8x8 (encoder
+                                                       //          dead path)
+    default:                                return 0xff;
+  }
+}
+
+}  // namespace
+
 namespace WelsDec {
 #define IDX_UNUSED -1
 
@@ -1361,12 +1406,27 @@ int32_t ParseSignificantMapCabac (int32_t* pSignificantMap, int32_t iResProperty
   return ERR_NONE;
 }
 
-int32_t ParseSignificantCoeffCabac (int32_t* pSignificant, int32_t iResProperty, PWelsDecoderContext pCtx) {
+// phasm-stego B.9.2.2: iBlockIdx threaded from the caller carries the
+// 4x4 sub-block index within the MB (or, for chroma DC, the
+// 16 + (plane<<2) chroma index used by both ParseResidualBlockCabac
+// callers in decode_slice.cpp). The phasm decoder hook receives it raw;
+// consumer-side translation demuxes per block_cat to match the
+// encoder-side PhasmStegoPos.sub_block convention.
+int32_t ParseSignificantCoeffCabac (int32_t* pSignificant, int32_t iResProperty, PWelsDecoderContext pCtx,
+                                    int32_t iBlockIdx) {
   uint32_t uiCode;
   PWelsCabacCtx pOneCtx = pCtx->pCabacCtx + (iResProperty == LUMA_DC_AC_8 ? NEW_CTX_OFFSET_ONE_8x8 : NEW_CTX_OFFSET_ONE) +
                           g_kBlockCat2CtxOffsetOne[iResProperty];
   PWelsCabacCtx pAbsCtx = pCtx->pCabacCtx + (iResProperty == LUMA_DC_AC_8 ? NEW_CTX_OFFSET_ABS_8x8 : NEW_CTX_OFFSET_ABS) +
                           g_kBlockCat2CtxOffsetAbs[iResProperty];
+
+  // phasm-stego B.9.2.2: cache MB coordinates + canonical block_cat
+  // once. Hot-path overhead = 1 nullptr check + 4 byte loads when no
+  // dec_post_read callback is registered.
+  const uint16_t phasm_mb_x      = (uint16_t) pCtx->pCurDqLayer->iMbX;
+  const uint16_t phasm_mb_y      = (uint16_t) pCtx->pCurDqLayer->iMbY;
+  const uint8_t  phasm_block_cat = phasm_map_res_property_to_block_cat (iResProperty);
+  const uint8_t  phasm_sub_block = (uint8_t) (iBlockIdx & 0xff);
 
   const int16_t iMaxType = g_kMaxC2[iResProperty];
   int32_t i = g_kMaxPos[iResProperty];
@@ -1390,6 +1450,14 @@ int32_t ParseSignificantCoeffCabac (int32_t* pSignificant, int32_t iResProperty,
       WELS_READ_VERIFY (DecodeBypassCabac (pCtx->pCabacDecEngine, uiCode));
       if (uiCode)
         *pCoff = - *pCoff;
+      // phasm-stego B.9.2.2: CoeffSign hook fires after the sign bypass
+      // bin is parsed. uiCode is the raw parsed value (0 = +, 1 = -),
+      // i is the CABAC reverse-scan position (= the canonical phasm
+      // walker scan position; matches walker convention 0..g_kMaxPos
+      // per block_cat). No-op when no dec_post_read callback is
+      // registered (helper returns immediately).
+      phasm_dec_emit_coeff_sign (phasm_mb_x, phasm_mb_y, phasm_block_cat,
+                                 phasm_sub_block, (uint8_t) i, (int32_t) uiCode);
     }
     pCoff--;
   }
@@ -1411,7 +1479,7 @@ int32_t ParseResidualBlockCabac8x8 (PWelsNeighAvail pNeighAvail, uint8_t* pNonZe
   uiCbpBit = 1; // for 8x8, MaxNumCoeff == 64 && uiCbpBit == 1
   if (uiCbpBit) { //has coeff
     WELS_READ_VERIFY (ParseSignificantMapCabac (pSignificantMap, iResProperty, pCtx, uiTotalCoeffNum));
-    WELS_READ_VERIFY (ParseSignificantCoeffCabac (pSignificantMap, iResProperty, pCtx));
+    WELS_READ_VERIFY (ParseSignificantCoeffCabac (pSignificantMap, iResProperty, pCtx, iIndex));
   }
 
   pNonZeroCountCache[g_kCacheNzcScanIdx[iIndex]] =
@@ -1453,7 +1521,7 @@ int32_t ParseResidualBlockCabac (PWelsNeighAvail pNeighAvail, uint8_t* pNonZeroC
   WELS_READ_VERIFY (ParseCbfInfoCabac (pNeighAvail, pNonZeroCountCache, iIndex, iResProperty, pCtx, uiCbpBit));
   if (uiCbpBit) { //has coeff
     WELS_READ_VERIFY (ParseSignificantMapCabac (pSignificantMap, iResProperty, pCtx, uiTotalCoeffNum));
-    WELS_READ_VERIFY (ParseSignificantCoeffCabac (pSignificantMap, iResProperty, pCtx));
+    WELS_READ_VERIFY (ParseSignificantCoeffCabac (pSignificantMap, iResProperty, pCtx, iIndex));
   }
 
   iCurNzCacheIdx = g_kCacheNzcScanIdx[iIndex];

@@ -15,6 +15,9 @@ cpp_sources = [
   'src/WelsThread.cpp',
   'src/WelsThreadLib.cpp',
   'src/WelsThreadPool.cpp',
+  # phasm-stego B.9.2.2: shared callback state + accessors + decoder
+  # emit helpers. Both libencoder and libdecoder use these.
+  'src/wels_stego_common.cpp',
 ]
 
 objs_asm = []
