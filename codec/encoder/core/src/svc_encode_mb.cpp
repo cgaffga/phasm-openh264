@@ -77,6 +77,19 @@ void WelsDctMb (int16_t* pRes, uint8_t* pEncMb, int32_t iEncStride, uint8_t* pBe
 
 void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
   ENFORCE_STACK_ALIGN_1D (int16_t, aDctT4Dc, 16, 16)
+  /* phasm-stego C.8.3 dual-recon snapshots. Held on the stack uncondition-
+   * ally for simplicity; the recompute branch below is gated on the
+   * encoder pre-emit callback being registered, so when no stego session
+   * is active the snapshots+recompute are skipped entirely.
+   *
+   * `phasm_dr_active` is captured here ONCE so the rest of the function
+   * doesn't pay the global accessor cost on every line. */
+  ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_aDctT4Dc, 16, 16)
+  ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes,    256, 16)
+  ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_recon,   256, 16)
+  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+                               && (pEncCtx->pCurDqLayer->pVisualRecPic != NULL);
+
   SWelsFuncPtrList* pFuncList   = pEncCtx->pFuncList;
   SDqLayer* pCurDqLayer         = pEncCtx->pCurDqLayer;
   const int32_t kiEncStride     = pCurDqLayer->iEncStride[0];
@@ -96,6 +109,13 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
 
   pFuncList->pfTransformHadamard4x4Dc (aDctT4Dc, pRes);
   pFuncList->pfQuantizationDc4x4 (aDctT4Dc, pFF[0] << 1, pMF[0]>>1);
+
+  /* phasm-stego C.8.3: snapshot post-quant clean DC before HOOK-A may
+   * mutate aDctT4Dc. The 16 16-bit entries map one-per-4x4-sub-block,
+   * raster-within-MB order. */
+  if (phasm_dr_active) {
+    memcpy(phasm_dr_clean_aDctT4Dc, aDctT4Dc, sizeof(int16_t) * 16);
+  }
 
   /* phasm-stego HOOK-A: I_16x16 luma DC, post-quant pre-scan. Each of
    * the 16 entries in aDctT4Dc holds the (Hadamard-transformed,
@@ -133,6 +153,13 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
 
   for (i = 0; i < 4; i++) {
     pFuncList->pfQuantizationFour4x4 (pRes, pFF,  pMF);
+
+    /* phasm-stego C.8.3: snapshot the 64-entry post-quant clean AC strip
+     * before HOOK-B fires. Strip i covers raster sub-blocks (i*4)..(i*4+3),
+     * 16 entries each. */
+    if (phasm_dr_active) {
+      memcpy(phasm_dr_clean_pRes + i * 64, pRes, sizeof(int16_t) * 64);
+    }
 
     /* phasm-stego HOOK-B: I_16x16 luma AC, post-quant pre-scan, ×4 strips.
      * pRes points to the current strip (64 ints). Each strip holds 4 sub-
@@ -225,6 +252,122 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
     pFuncList->pfIDctI16x16Dc (pPred, kiRecStride, pBestPred, 16, aDctT4Dc);
   } else {
     pFuncList->pfCopy16x16Aligned (pPred, kiRecStride, pBestPred, 16);
+  }
+
+  /* ----------------------------------------------------------------- *
+   * phasm-stego C.8.3: I_16x16 dual-recon post-pass.
+   *
+   * At this point `pPred` (= pDecPic at the MB offset) carries the
+   * STEGO-flipped reconstruction -- the encoder's recon path consumed
+   * the post-HOOK aDctT4Dc + pRes. To break the cascade, we need
+   * pDecPic to carry the CLEAN reconstruction instead. Stego pixels
+   * still need to be tracked (for cascade-verify) so they go into
+   * pVisualRecPic.
+   *
+   * The recompute reuses the encoder's own dequant + DC re-injection
+   * + IDCT helpers on the snapshotted clean post-quant arrays. It's
+   * the same code path as lines 188-227 above, run on
+   * phasm_dr_clean_aDctT4Dc + phasm_dr_clean_pRes scratch.
+   *
+   * Cost: ~one extra dequant pass + four pfIDctFourT4 (CBP>0 case) or
+   * one pfIDctI16x16Dc (DC-only). CBP=0 case is a no-op for the
+   * clean recompute (pPred already holds pBestPred); just the
+   * stego-mirror copy. v1.1+ optimization (#449): delta-IDCT instead
+   * of full recompute.
+   * ----------------------------------------------------------------- */
+  if (phasm_dr_active) {
+    /* (1) Snapshot the current stego recon block at pPred (16x16, with
+     *     the layer's encode stride between rows) into a contiguous
+     *     stride-16 scratch. This is the picture pVisualRecPic will
+     *     receive at the end. */
+    for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
+      memcpy(phasm_dr_stego_recon + phasm_y * 16,
+             pPred + (size_t)phasm_y * (size_t)kiRecStride,
+             16);
+    }
+
+    /* (2) Recompute the clean recon by re-running the encoder's own
+     *     dequant + DC reinject + IDCT on the snapshot post-quant
+     *     arrays. The work buffers must be local (writable copies of
+     *     the snapshots) since the IDCT helpers mutate in place. */
+    if (uiNoneZeroCountMbAc > 0) {
+      ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_dc_work,  16, 16)
+      ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_res_work, 256, 16)
+      memcpy(phasm_dr_clean_dc_work,  phasm_dr_clean_aDctT4Dc, sizeof(phasm_dr_clean_dc_work));
+      memcpy(phasm_dr_clean_res_work, phasm_dr_clean_pRes,     sizeof(phasm_dr_clean_res_work));
+
+      if (uiCountI16x16Dc > 0) {
+        if (uiQp < 12) {
+          WelsIHadamard4x4Dc (phasm_dr_clean_dc_work);
+          WelsDequantLumaDc4x4 (phasm_dr_clean_dc_work, uiQp);
+        } else {
+          pFuncList->pfDequantizationIHadamard4x4 (phasm_dr_clean_dc_work,
+                                                   g_kuiDequantCoeff[uiQp][0] >> 2);
+        }
+      }
+      pFuncList->pfDequantizationFour4x4 (phasm_dr_clean_res_work,       g_kuiDequantCoeff[uiQp]);
+      pFuncList->pfDequantizationFour4x4 (phasm_dr_clean_res_work + 64,  g_kuiDequantCoeff[uiQp]);
+      pFuncList->pfDequantizationFour4x4 (phasm_dr_clean_res_work + 128, g_kuiDequantCoeff[uiQp]);
+      pFuncList->pfDequantizationFour4x4 (phasm_dr_clean_res_work + 192, g_kuiDequantCoeff[uiQp]);
+
+      phasm_dr_clean_res_work[0]   = phasm_dr_clean_dc_work[0];
+      phasm_dr_clean_res_work[16]  = phasm_dr_clean_dc_work[1];
+      phasm_dr_clean_res_work[32]  = phasm_dr_clean_dc_work[4];
+      phasm_dr_clean_res_work[48]  = phasm_dr_clean_dc_work[5];
+      phasm_dr_clean_res_work[64]  = phasm_dr_clean_dc_work[2];
+      phasm_dr_clean_res_work[80]  = phasm_dr_clean_dc_work[3];
+      phasm_dr_clean_res_work[96]  = phasm_dr_clean_dc_work[6];
+      phasm_dr_clean_res_work[112] = phasm_dr_clean_dc_work[7];
+      phasm_dr_clean_res_work[128] = phasm_dr_clean_dc_work[8];
+      phasm_dr_clean_res_work[144] = phasm_dr_clean_dc_work[9];
+      phasm_dr_clean_res_work[160] = phasm_dr_clean_dc_work[12];
+      phasm_dr_clean_res_work[176] = phasm_dr_clean_dc_work[13];
+      phasm_dr_clean_res_work[192] = phasm_dr_clean_dc_work[10];
+      phasm_dr_clean_res_work[208] = phasm_dr_clean_dc_work[11];
+      phasm_dr_clean_res_work[224] = phasm_dr_clean_dc_work[14];
+      phasm_dr_clean_res_work[240] = phasm_dr_clean_dc_work[15];
+
+      /* IDCT clean into pPred (overwriting the stego we snapshotted). */
+      pFuncList->pfIDctFourT4 (pPred,                       kiRecStride, pBestPred,        16, phasm_dr_clean_res_work);
+      pFuncList->pfIDctFourT4 (pPred + 8,                   kiRecStride, pBestPred + 8,    16, phasm_dr_clean_res_work + 64);
+      pFuncList->pfIDctFourT4 (pPred + kiRecStride * 8,     kiRecStride, pBestPred + 128,  16, phasm_dr_clean_res_work + 128);
+      pFuncList->pfIDctFourT4 (pPred + kiRecStride * 8 + 8, kiRecStride, pBestPred + 136,  16, phasm_dr_clean_res_work + 192);
+    } else if (uiCountI16x16Dc > 0) {
+      ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_dc_work, 16, 16)
+      memcpy(phasm_dr_clean_dc_work, phasm_dr_clean_aDctT4Dc, sizeof(phasm_dr_clean_dc_work));
+      if (uiQp < 12) {
+        WelsIHadamard4x4Dc (phasm_dr_clean_dc_work);
+        WelsDequantLumaDc4x4 (phasm_dr_clean_dc_work, uiQp);
+      } else {
+        pFuncList->pfDequantizationIHadamard4x4 (phasm_dr_clean_dc_work,
+                                                 g_kuiDequantCoeff[uiQp][0] >> 2);
+      }
+      pFuncList->pfIDctI16x16Dc (pPred, kiRecStride, pBestPred, 16, phasm_dr_clean_dc_work);
+    }
+    /* CBP=0 branch: pPred already holds pBestPred (no coeffs to flip,
+     * clean and stego are identical). No clean-recompute needed.    */
+
+    /* (3) Mirror the snapshotted stego recon into pVisualRecPic at the
+     *     MB offset. The clean side has already been written into pPred
+     *     above (or never moved off pBestPred for CBP=0), so we pass
+     *     clean_dst=NULL to the helper -- pDecPic doesn't need a second
+     *     memcpy. The dual_recon_observe callback intentionally does
+     *     NOT fire here (helper requires both clean+stego pointers); a
+     *     v1.1+ enhancement could snapshot the recomputed clean to pass
+     *     it through. */
+    {
+      const int32_t phasm_dr_px = pCurMb->iMbX * 16;
+      const int32_t phasm_dr_py = pCurMb->iMbY * 16;
+      phasm_dual_recon_writeback (
+          (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/0,
+          phasm_dr_px, phasm_dr_py, /*block_w=*/16, /*block_h=*/16,
+          /*clean_dst=*/NULL,
+          /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
+          /*dst_stride=*/kiRecStride,
+          /*clean_pixels=*/NULL,
+          /*stego_pixels=*/phasm_dr_stego_recon,
+          /*src_stride=*/16);
+    }
   }
 }
 void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uint8_t uiI4x4Idx) {
