@@ -1488,6 +1488,34 @@ int32_t ParseSignificantCoeffCabac (int32_t* pSignificant, int32_t iResProperty,
       if (*pCoff == 2) {
         WELS_READ_VERIFY (DecodeUEGLevelCabac (pCtx->pCabacDecEngine, pAbsCtx + c2, uiCode));
         *pCoff += uiCode;
+
+        // phasm-stego B.9.2.5: CoeffSuffixLsb hook fires when
+        // |coeff| >= 16 — the WET-eligible threshold the phasm
+        // walker uses (`COEFF_SUFFIX_LSB_THRESHOLD = 16` in
+        // core/src/codec/h264/stego/inject.rs). The spec emits a
+        // suffix bit starting at |coeff| = 15 (when the unary
+        // prefix saturates at 13 inside DecodeUEGLevelCabac), but
+        // phasm excludes |coeff| = 15 from the stego cover because
+        // flipping its LSB would move |coeff| to 14, leaving the
+        // suffix-eligible range entirely. Matching the walker's
+        // filter keeps decoder fire count = walker position count
+        // bit-for-bit, so the consumer can use either as the cover.
+        //
+        // *pCoff at this point is the unsigned magnitude (sign bit
+        // not yet applied; spec § 9.3.3.2 emits magnitude then sign).
+        if (*pCoff >= 16) {
+          // Phasm encoder convention: `(|coeff| - 15) & 1` — the
+          // LSB of (|coeff| - 15), i.e., the LSB of the EG0 suffix
+          // value. For |coeff| = 16: (16-15)&1 = 1. For |coeff| = 17:
+          // (17-15)&1 = 0. Etc.
+          const int32_t phasm_suffix_lsb = (int32_t) ((*pCoff - 15) & 1);
+          phasm_dec_emit_coeff_suffix_lsb (phasm_mb_x, phasm_mb_y,
+                                           phasm_block_cat,
+                                           phasm_sub_block,
+                                           (uint8_t) i,
+                                           phasm_suffix_lsb);
+        }
+
         ++c2;
         c2 = WELS_MIN (c2, iMaxType);
         c1 = 0;
