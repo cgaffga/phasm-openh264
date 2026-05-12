@@ -996,6 +996,15 @@ void  FreeRefList (SRefList*& pRefList, CMemoryAlign* pMa, const int iMaxNumRefF
     ++ iRef;
   } while (iRef < 1 + iMaxNumRefFrame);
 
+  // phasm: parallel free for stego-mirror pool
+  iRef = 0;
+  do {
+    if (pRefList->pVisualRef[iRef] != NULL) {
+      FreePicture (pMa, &pRefList->pVisualRef[iRef]);
+    }
+    ++ iRef;
+  } while (iRef < 1 + iMaxNumRefFrame);
+
   pMa->WelsFree (pRefList, "pRefList");
   pRefList = NULL;
 }
@@ -1057,7 +1066,18 @@ static inline int32_t InitDqLayers (sWelsEncCtx** ppCtx, SExistingParasetList* p
       ++ i;
     } while (i < 1 + iNumRef);
 
+    // phasm: parallel stego-mirror pool. bNeedMbInfo=false, iNeedFeatureStorage=0
+    // -- mirror only owns Y/U/V planes; per-MB metadata + screen-content feature
+    // storage stay single-source on pRef[].
+    i = 0;
+    do {
+      pRefList->pVisualRef[i] = AllocPicture (pMa, kiWidth, kiHeight, false, 0);
+      WELS_VERIFY_RETURN_PROC_IF (1, (NULL == pRefList->pVisualRef[i]), FreeRefList (pRefList, pMa, iNumRef))
+      ++ i;
+    } while (i < 1 + iNumRef);
+
     pRefList->pNextBuffer = pRefList->pRef[0];
+    pRefList->pVisualNextBuffer = pRefList->pVisualRef[0]; // phasm
     (*ppCtx)->ppRefPicListExt[iDlayerIndex] = pRefList;
     ++ iDlayerIndex;
   }
@@ -1777,10 +1797,13 @@ int32_t RequestMemorySvc (sWelsEncCtx** ppCtx, SExistingParasetList* pExistingPa
   WELS_VERIFY_RETURN_IF (1, (NULL == (*ppCtx)->pMvdCostTable))
   MvdCostInit ((*ppCtx)->pMvdCostTable, kuiMvdInterTableStride);  //should put to a better place?
 
-  if ((*ppCtx)->ppRefPicListExt[0] != NULL && (*ppCtx)->ppRefPicListExt[0]->pRef[0] != NULL)
+  if ((*ppCtx)->ppRefPicListExt[0] != NULL && (*ppCtx)->ppRefPicListExt[0]->pRef[0] != NULL) {
     (*ppCtx)->pDecPic = (*ppCtx)->ppRefPicListExt[0]->pRef[0];
-  else
+    (*ppCtx)->pVisualDecPic = (*ppCtx)->ppRefPicListExt[0]->pVisualRef[0]; // phasm
+  } else {
     (*ppCtx)->pDecPic = NULL; // error here
+    (*ppCtx)->pVisualDecPic = NULL; // phasm
+  }
 
   (*ppCtx)->pSps = & (*ppCtx)->pSpsArray[0];
   (*ppCtx)->pPps = & (*ppCtx)->pPPSArray[0];
@@ -2544,6 +2567,7 @@ void WelsInitCurrentLayer (sWelsEncCtx* pCtx,
     return;
 
   pCurDq->pDecPic = pDecPic;
+  pCurDq->pVisualRecPic = pCtx->pVisualDecPic; // phasm: stego mirror tracks ctx slot
 
   assert (iSliceCount > 0);
 
@@ -3620,6 +3644,7 @@ int32_t WelsEncoderEncodeExt (sWelsEncCtx* pCtx, SFrameBSInfo* pFbi, const SSour
     pCtx->eNalPriority = eNalRefIdc;
 
     pCtx->pDecPic               = pCtx->ppRefPicListExt[iCurDid]->pNextBuffer;
+    pCtx->pVisualDecPic         = pCtx->ppRefPicListExt[iCurDid]->pVisualNextBuffer; // phasm
     fsnr                        = pCtx->pDecPic;
     pCtx->pDecPic->iPictureType = pCtx->eSliceType;
     pCtx->pDecPic->iFramePoc    = pParamInternal->iPOC;

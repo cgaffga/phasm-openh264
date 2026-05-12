@@ -73,6 +73,12 @@ typedef struct TagRefList {
   SPicture*     pLongRefList[1 + MAX_REF_PIC_COUNT];    // reference list 1 - int32_t
   SPicture*     pNextBuffer;
   SPicture*     pRef[1 + MAX_REF_PIC_COUNT];    // plus 1 for swap intend
+  // phasm: parallel stego-mirror pool (visual_recon). 1:1 slot index with pRef[].
+  // Never feeds into pShortRefList / pLongRefList / pRefList0 -- decoupling enforced
+  // at encoder_ext.cpp:2809 (PrefetchReferencePicture) and ref_list_mgr_svc.cpp:390
+  // (WelsUpdateRefList) by construction: only pVisualNextBuffer is ever read.
+  SPicture*     pVisualRef[1 + MAX_REF_PIC_COUNT];
+  SPicture*     pVisualNextBuffer;
   uint8_t       uiShortRefCount;
   uint8_t       uiLongRefCount; // dependend on pRef pic module
 } SRefList;
@@ -143,6 +149,10 @@ typedef struct TagWelsEncCtx {
   // pointers
   SPicture*         pEncPic;                // pointer to current picture to be encoded
   SPicture*         pDecPic;                // pointer to current picture being reconstructed
+  // phasm: stego-mirror of pDecPic. Aliases pVisualRef[i] where i is the same slot index
+  // as pNextBuffer in pRef[]. Read by debug-dump + PSNR + cascade-verify; never read
+  // by encoder-internal prediction (intra-pred / ME / deblock).
+  SPicture*         pVisualDecPic;
   SPicture*         pRefPic;                // pointer to current reference picture
 
   SDqLayer*         pCurDqLayer;            // DQ layer context used to being encoded currently, for reference base layer to refer: pCurDqLayer->pRefLayer if applicable

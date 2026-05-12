@@ -109,6 +109,8 @@ bool                    bDeblockingParallelFlag; //parallel_deblocking_flag
 
 SPicture*               pRefPic;        // reference picture pointer
 SPicture*               pDecPic;        // reconstruction picture pointer for layer
+// phasm: stego-mirror of pDecPic for current layer. Aliases pCtx->pVisualDecPic.
+SPicture*               pVisualRecPic;
 SPicture*               pRefOri[MAX_REF_PIC_COUNT];
 
 bool                    bThreadSlcBufferFlag;

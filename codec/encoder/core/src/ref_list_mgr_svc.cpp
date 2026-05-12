@@ -77,6 +77,7 @@ void WelsResetRefList (sWelsEncCtx* pCtx) {
   pRefList->uiLongRefCount = 0;
   pRefList->uiShortRefCount = 0;
   pRefList->pNextBuffer = pRefList->pRef[0];
+  pRefList->pVisualNextBuffer = pRefList->pVisualRef[0]; // phasm
 }
 
 static inline void DeleteLTRFromLongList (sWelsEncCtx* pCtx, int32_t iIdx) {
@@ -332,9 +333,11 @@ static void PrefetchNextBuffer (sWelsEncCtx* pCtx) {
   int32_t i;
 
   pRefList->pNextBuffer = NULL;
+  pRefList->pVisualNextBuffer = NULL; // phasm
   for (i = 0; i < kiNumRef + 1; i++) {
     if (!pRefList->pRef[i]->bUsedAsRef) {
       pRefList->pNextBuffer = pRefList->pRef[i];
+      pRefList->pVisualNextBuffer = pRefList->pVisualRef[i]; // phasm: 1:1 slot
       break;
     }
   }
@@ -342,9 +345,19 @@ static void PrefetchNextBuffer (sWelsEncCtx* pCtx) {
   if (pRefList->pNextBuffer == NULL && pRefList->uiShortRefCount > 0) {
     pRefList->pNextBuffer = pRefList->pShortRefList[pRefList->uiShortRefCount - 1];
     pRefList->pNextBuffer->SetUnref();
+    // phasm: locate the visual sibling by scanning pRef[] for the same pointer.
+    // pShortRefList[] entries were previously promoted from pRef[] slots, so the
+    // match is guaranteed to exist within pRef[0..kiNumRef].
+    for (i = 0; i < kiNumRef + 1; i++) {
+      if (pRefList->pRef[i] == pRefList->pNextBuffer) {
+        pRefList->pVisualNextBuffer = pRefList->pVisualRef[i];
+        break;
+      }
+    }
   }
 
   pCtx->pDecPic = pRefList->pNextBuffer;
+  pCtx->pVisualDecPic = pRefList->pVisualNextBuffer; // phasm
 }
 
 /*
