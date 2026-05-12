@@ -293,8 +293,11 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
     if (uiNoneZeroCountMbAc > 0) {
       ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_dc_work,  16, 16)
       ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_res_work, 256, 16)
-      memcpy(phasm_dr_clean_dc_work,  phasm_dr_clean_aDctT4Dc, sizeof(phasm_dr_clean_dc_work));
-      memcpy(phasm_dr_clean_res_work, phasm_dr_clean_pRes,     sizeof(phasm_dr_clean_res_work));
+      /* Note: ENFORCE_STACK_ALIGN_1D declares the name as a `int16_t*`
+       * pointer (not an array), so sizeof(name) is the pointer size.
+       * Use explicit element-count byte size here and below. */
+      memcpy(phasm_dr_clean_dc_work,  phasm_dr_clean_aDctT4Dc, sizeof(int16_t) * 16);
+      memcpy(phasm_dr_clean_res_work, phasm_dr_clean_pRes,     sizeof(int16_t) * 256);
 
       if (uiCountI16x16Dc > 0) {
         if (uiQp < 12) {
@@ -334,7 +337,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
       pFuncList->pfIDctFourT4 (pPred + kiRecStride * 8 + 8, kiRecStride, pBestPred + 136,  16, phasm_dr_clean_res_work + 192);
     } else if (uiCountI16x16Dc > 0) {
       ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_dc_work, 16, 16)
-      memcpy(phasm_dr_clean_dc_work, phasm_dr_clean_aDctT4Dc, sizeof(phasm_dr_clean_dc_work));
+      memcpy(phasm_dr_clean_dc_work, phasm_dr_clean_aDctT4Dc, sizeof(int16_t) * 16);
       if (uiQp < 12) {
         WelsIHadamard4x4Dc (phasm_dr_clean_dc_work);
         WelsDequantLumaDc4x4 (phasm_dr_clean_dc_work, uiQp);
@@ -395,8 +398,23 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
                                    pEncCtx->uiTemporalId];
   int32_t iNoneZeroCount = 0;
 
+  /* phasm-stego C.8.4 dual-recon: per-sub-block snapshot + scratch. The
+   * scope here is ONE 4x4 sub-block; the caller (WelsMdI4x4 / Fast) runs
+   * this function once per iI4x4Idx ∈ 0..15 inside its own loop. */
+  ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes4x4, 16, 16)
+  ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_i4x4,    16, 4)
+  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+                               && (pCurDqLayer->pVisualRecPic != NULL);
+
   pFuncList->pfDctT4 (pResI4x4, & (pEncMb[pStrideEncBlockOffset[uiI4x4Idx]]), iEncStride, pBestPred, 4);
   pFuncList->pfQuantization4x4 (pResI4x4, pFF, pMF);
+
+  /* phasm-stego C.8.4: snapshot post-quant clean before HOOK-E may mutate.
+   * pResI4x4 holds 16 quantized coefficients in raster within-sub-block
+   * order (same view HOOK-E modifies + the dequant+IDCT below reads). */
+  if (phasm_dr_active) {
+    memcpy(phasm_dr_clean_pRes4x4, pResI4x4, sizeof(int16_t) * 16);
+  }
 
   /* phasm-stego HOOK-E: I_4x4 luma, post-quant pre-scan. Called per
    * 4x4 sub-block (uiI4x4Idx 0..15). pResI4x4 holds 16 quantized
@@ -441,6 +459,60 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
     pFuncList->pfIDctT4 (pPredI4x4, iRecStride, pBestPred, 4, pResI4x4);
   } else
     pFuncList->pfCopy4x4 (pPredI4x4, iRecStride, pBestPred, 4);
+
+  /* ----------------------------------------------------------------- *
+   * phasm-stego C.8.4: I_4x4 sub-block dual-recon post-pass.
+   *
+   * pPredI4x4 (= pDecPic at sub-block offset) currently holds STEGO
+   * pixels (the IDCT/copy above consumed post-HOOK-E coefficients).
+   * The audit §1 lock states that within-MB intra-pred neighbour reads
+   * for subsequent 4x4 sub-blocks must read CLEAN pixels, so we restore
+   * pDecPic to clean here, ahead of the next loop iteration in the
+   * caller (WelsMdI4x4 / Fast).
+   *
+   * Cost: one extra pfDequantization4x4 + pfIDctT4 per sub-block when
+   * nNz > 0; pure memcpy when nNz == 0.
+   * ----------------------------------------------------------------- */
+  if (phasm_dr_active) {
+    /* (1) Snapshot stego sub-block (4 rows × 4 bytes, picture stride). */
+    for (int32_t phasm_y = 0; phasm_y < 4; ++phasm_y) {
+      memcpy(phasm_dr_stego_i4x4 + phasm_y * 4,
+             pPredI4x4 + (size_t)phasm_y * (size_t)iRecStride,
+             4);
+    }
+
+    if (iNoneZeroCount > 0) {
+      /* (2) Recompute clean: dequant snapshot + IDCT into pPredI4x4
+       *     (overwrites the stego we just snapshotted). Note that
+       *     ENFORCE_STACK_ALIGN_1D yields a `int16_t*` named symbol
+       *     (not an array), so sizeof(...) returns the pointer size;
+       *     pass the explicit byte count to memcpy below. */
+      ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_work, 16, 16)
+      memcpy(phasm_dr_clean_work, phasm_dr_clean_pRes4x4, sizeof(int16_t) * 16);
+      pFuncList->pfDequantization4x4 (phasm_dr_clean_work, g_kuiDequantCoeff[uiQp]);
+      pFuncList->pfIDctT4 (pPredI4x4, iRecStride, pBestPred, 4, phasm_dr_clean_work);
+    }
+    /* CBP=0 branch: pPredI4x4 already holds the prediction copy (clean
+     * == stego at sub-block level). No clean recompute needed. */
+
+    /* (3) Mirror stego sub-block into pVisualRecPic at the same byte
+     *     offset. The two pictures share the same iLineSize so a single
+     *     sub-block offset (pPredI4x4 - pCsData[0]) maps both. */
+    {
+      const ptrdiff_t phasm_dr_plane_off = pPredI4x4 - pCurDqLayer->pCsData[0];
+      const int32_t phasm_dr_py = (int32_t)(phasm_dr_plane_off / iRecStride);
+      const int32_t phasm_dr_px = (int32_t)(phasm_dr_plane_off % iRecStride);
+      phasm_dual_recon_writeback (
+          (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/0,
+          phasm_dr_px, phasm_dr_py, /*block_w=*/4, /*block_h=*/4,
+          /*clean_dst=*/NULL,
+          /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
+          /*dst_stride=*/iRecStride,
+          /*clean_pixels=*/NULL,
+          /*stego_pixels=*/phasm_dr_stego_i4x4,
+          /*src_stride=*/4);
+    }
+  }
 }
 
 void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache) {
