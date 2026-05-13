@@ -282,6 +282,19 @@ const uint8_t* phasm_get_mv_clean_mc_luma(void);
 void           phasm_stash_mv_clean_mc_chroma(int32_t iUV, const uint8_t* clean_mc_64);
 const uint8_t* phasm_get_mv_clean_mc_chroma(int32_t iUV);
 
+/* C.8.7 v1.1 — partitioned-mode slot population for the MvdSign cascade
+ * stash. Partitions write their slice (w × h) starting at (dst_x, dst_y)
+ * within the 16×16 (luma) or 8×8 (chroma) packed stash buffer. Caller
+ * computes the slot offset from g_kuiSmb4AddrIn256[iIdx] and the
+ * partition shape (16x8, 8x16, 8x8, sub-MB types). Bounds-checked. */
+void phasm_stash_mv_clean_mc_luma_slot(int32_t dst_x, int32_t dst_y,
+                                        int32_t w, int32_t h,
+                                        const uint8_t* src, int32_t src_stride);
+void phasm_stash_mv_clean_mc_chroma_slot(int32_t iUV,
+                                          int32_t dst_x, int32_t dst_y,
+                                          int32_t w, int32_t h,
+                                          const uint8_t* src, int32_t src_stride);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

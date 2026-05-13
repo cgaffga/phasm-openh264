@@ -186,6 +186,31 @@ const uint8_t* phasm_get_mv_clean_mc_chroma(int32_t iUV) {
   return g_phasm_mv_clean_mc_chroma[iUV];
 }
 
+void phasm_stash_mv_clean_mc_luma_slot(int32_t dst_x, int32_t dst_y,
+                                        int32_t w, int32_t h,
+                                        const uint8_t* src, int32_t src_stride) {
+  if (src == nullptr || w <= 0 || h <= 0) return;
+  if (dst_x < 0 || dst_y < 0 || dst_x + w > 16 || dst_y + h > 16) return;
+  for (int32_t row = 0; row < h; ++row) {
+    std::memcpy(&g_phasm_mv_clean_mc_luma[(dst_y + row) * 16 + dst_x],
+                src + (size_t)row * (size_t)src_stride,
+                (size_t)w);
+  }
+}
+
+void phasm_stash_mv_clean_mc_chroma_slot(int32_t iUV,
+                                          int32_t dst_x, int32_t dst_y,
+                                          int32_t w, int32_t h,
+                                          const uint8_t* src, int32_t src_stride) {
+  if (iUV < 0 || iUV > 1 || src == nullptr || w <= 0 || h <= 0) return;
+  if (dst_x < 0 || dst_y < 0 || dst_x + w > 8 || dst_y + h > 8) return;
+  for (int32_t row = 0; row < h; ++row) {
+    std::memcpy(&g_phasm_mv_clean_mc_chroma[iUV][(dst_y + row) * 8 + dst_x],
+                src + (size_t)row * (size_t)src_stride,
+                (size_t)w);
+  }
+}
+
 // ---------------------------------------------------------------------
 // phasm_dual_recon_writeback — internal helper (Phase C.8.2+)
 //

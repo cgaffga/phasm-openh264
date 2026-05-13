@@ -81,6 +81,21 @@ static inline void phasm_apply_h_partition_hook(
     int32_t blockW,
     int32_t blockH) {
   if (PhasmStegoGetEncPreEmit() == NULL) return;
+  /* C.8.7 v1.1 luma cascade-break (partitioned): snapshot the clean MC
+   * for this partition slot BEFORE the override may re-MC at the stego
+   * MV. At entry, pDstLumaBase + addr holds the CLEAN MC produced by
+   * MeRefineFracPixel above the call site. After the snapshot the live
+   * re-MC (if the hook fires) overwrites pDstLumaBase + addr with the
+   * STEGO MC, while the stash slot retains CLEAN MC. OutputPMb shifts
+   * pDecPic by (CLEAN_MC − STEGO_MC) for the whole MB when the active
+   * flag is set; partitions that don't fire leave stash_slot == STEGO_MC
+   * so their shift contribution is zero. */
+  uint8_t addr = g_kuiSmb4AddrIn256[iIdx];
+  int32_t px = (int32_t)(addr & 0x0f);
+  int32_t py = (int32_t)(addr >> 4);
+  phasm_stash_mv_clean_mc_luma_slot(px, py, blockW, blockH,
+                                     pDstLumaBase + addr,
+                                     (int32_t)MB_WIDTH_LUMA);
   PhasmMvHookCtx ctx;
   ctx.frame_num     = PhasmStegoGetFrameNum();
   ctx.mb_x          = (uint16_t)pCurMb->iMbX;
@@ -99,9 +114,6 @@ static inline void phasm_apply_h_partition_hook(
   ctx.mvList_y_qpel = NULL;
   if (phasm_apply_mvd_hooks(&ctx)) {
     int32_t refLineSize = pCurDqLayer->pRefPic->iLineSize[0];
-    uint8_t addr = g_kuiSmb4AddrIn256[iIdx];
-    int32_t px = (int32_t)(addr & 0x0f);
-    int32_t py = (int32_t)(addr >> 4);
     pFunc->sMcFuncs.pMcLumaFunc(
         pMbCache->SPicData.pRefMb[0] + py * refLineSize + px,
         refLineSize,
@@ -110,6 +122,10 @@ static inline void phasm_apply_h_partition_hook(
         pMe->sMv.iMvX,
         pMe->sMv.iMvY,
         blockW, blockH);
+    /* Mark MB-level override active so OutputPMb applies the
+     * (CLEAN_MC − STEGO_MC) shift. Sticky across remaining partitions in
+     * this MB; cleared at MB entry for the NEXT MB. */
+    phasm_set_mv_override_active(1);
   }
 }
 
@@ -1816,7 +1832,11 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_STRIDE_BLK8;
       PredInter16x8Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe16x8[i], &sMeRefine, 16, 8);
-      /* phasm-stego HOOK-H2: P_16x8 MVD post-refine override per partition. */
+      /* phasm-stego HOOK-H2: P_16x8 MVD post-refine override per partition.
+       * C.8.7 v1.1 chroma capture: save the pre-hook (clean) MV so the
+       * chroma cascade-break below can MC at it. */
+      const int16_t phasm_h2_clean_mvx = pWelsMd->sMe.sMe16x8[i].sMv.iMvX;
+      const int16_t phasm_h2_clean_mvy = pWelsMd->sMe.sMe16x8[i].sMv.iMvY;
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe16x8[i],
                                     (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
@@ -1838,6 +1858,26 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       pTmpDstCr = pDstCr + iDstBlk4Stride;
       pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCb, iLineSizeRefUV, pTmpDstCb, 8, pMv->iMvX, pMv->iMvY, 8, 4); //Cb
       pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCr, iLineSizeRefUV, pTmpDstCr, 8, pMv->iMvX, pMv->iMvY, 8, 4); //Cr
+      /* C.8.7 v1.1 chroma cascade-break (16x8 partition i, 8×4 each).
+       * MC at the pre-hook (clean) MV into the per-partition slot of the
+       * chroma stash. Dst slot in the 8×8 stash is at (0, i*4). The
+       * always-populate guard is `PhasmStegoGetEncPreEmit()`: if no
+       * stego session, the stash isn't read by OutputPMb either. */
+      if (PhasmStegoGetEncPreEmit() != NULL) {
+        uint8_t phasm_h2_clean_cb[32], phasm_h2_clean_cr[32];
+        const int32_t phasm_h2_clean_uv_stride =
+          (phasm_h2_clean_mvy >> 3) * iLineSizeRefUV + (phasm_h2_clean_mvx >> 3);
+        pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCb + iRefBlk4Stride + phasm_h2_clean_uv_stride,
+                                                     iLineSizeRefUV,
+                                                     phasm_h2_clean_cb, 8,
+                                                     phasm_h2_clean_mvx, phasm_h2_clean_mvy, 8, 4);
+        pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCr + iRefBlk4Stride + phasm_h2_clean_uv_stride,
+                                                     iLineSizeRefUV,
+                                                     phasm_h2_clean_cr, 8,
+                                                     phasm_h2_clean_mvx, phasm_h2_clean_mvy, 8, 4);
+        phasm_stash_mv_clean_mc_chroma_slot(0, /*dst_x=*/0, /*dst_y=*/i * 4, 8, 4, phasm_h2_clean_cb, 8);
+        phasm_stash_mv_clean_mc_chroma_slot(1, /*dst_x=*/0, /*dst_y=*/i * 4, 8, 4, phasm_h2_clean_cr, 8);
+      }
     }
     break;
 
@@ -1851,7 +1891,10 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_WIDTH_BLK8;
       PredInter8x16Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe8x16[i], &sMeRefine, 8, 16);
-      /* phasm-stego HOOK-H3: P_8x16 MVD post-refine override per partition. */
+      /* phasm-stego HOOK-H3: P_8x16 MVD post-refine override per partition.
+       * C.8.7 v1.1 chroma capture: save pre-hook (clean) MV. */
+      const int16_t phasm_h3_clean_mvx = pWelsMd->sMe.sMe8x16[i].sMv.iMvX;
+      const int16_t phasm_h3_clean_mvy = pWelsMd->sMe.sMe8x16[i].sMv.iMvY;
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe8x16[i],
                                     (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
@@ -1872,6 +1915,23 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       pTmpDstCr = pDstCr + iRefBlk4Stride;
       pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCb, iLineSizeRefUV, pTmpDstCb, 8, pMv->iMvX, pMv->iMvY, 4, 8); //Cb
       pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCr, iLineSizeRefUV, pTmpDstCr, 8, pMv->iMvX, pMv->iMvY, 4, 8); //Cr
+      /* C.8.7 v1.1 chroma cascade-break (8x16 partition i, 4×8 each).
+       * Stash slot at (dst_x=iIdx, dst_y=0) where iIdx ∈ {0, 4}. */
+      if (PhasmStegoGetEncPreEmit() != NULL) {
+        uint8_t phasm_h3_clean_cb[32], phasm_h3_clean_cr[32];
+        const int32_t phasm_h3_clean_uv_stride =
+          (phasm_h3_clean_mvy >> 3) * iLineSizeRefUV + (phasm_h3_clean_mvx >> 3);
+        pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCb + iRefBlk4Stride + phasm_h3_clean_uv_stride,
+                                                     iLineSizeRefUV,
+                                                     phasm_h3_clean_cb, 8,
+                                                     phasm_h3_clean_mvx, phasm_h3_clean_mvy, 4, 8);
+        pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCr + iRefBlk4Stride + phasm_h3_clean_uv_stride,
+                                                     iLineSizeRefUV,
+                                                     phasm_h3_clean_cr, 8,
+                                                     phasm_h3_clean_mvx, phasm_h3_clean_mvy, 4, 8);
+        phasm_stash_mv_clean_mc_chroma_slot(0, /*dst_x=*/iIdx, /*dst_y=*/0, 4, 8, phasm_h3_clean_cb, 8);
+        phasm_stash_mv_clean_mc_chroma_slot(1, /*dst_x=*/iIdx, /*dst_y=*/0, 4, 8, phasm_h3_clean_cr, 8);
+      }
     }
     break;
   case MB_TYPE_8x8:
@@ -1882,13 +1942,16 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
 
       pCurMb->pRefIndex[i] = pWelsMd->uiRef;
       switch (pCurMb->uiSubMbType[i]) {
-      case SUB_MB_TYPE_8x8:
+      case SUB_MB_TYPE_8x8: {
         sMeRefine.pfCopyBlockByMode = pFunc->pfCopy8x8Aligned;
         //luma
         InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx8x8[i]);
         PredMv (&pMbCache->sMvComponents, iBlk8Idx, 2, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMvp);
         MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk8Idx], &pWelsMd->sMe.sMe8x8[i], &sMeRefine, 8, 8);
-        /* phasm-stego HOOK-H4: P_8x8/SUB_MB_TYPE_8x8 MVD per 8x8 partition. */
+        /* phasm-stego HOOK-H4: P_8x8/SUB_MB_TYPE_8x8 MVD per 8x8 partition.
+         * C.8.7 v1.1 chroma capture: save pre-hook clean MV. */
+        const int16_t phasm_h4_clean_mvx = pWelsMd->sMe.sMe8x8[i].sMv.iMvX;
+        const int16_t phasm_h4_clean_mvy = pWelsMd->sMe.sMe8x8[i].sMv.iMvY;
         phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                       pDstLuma, &pWelsMd->sMe.sMe8x8[i],
                                       (uint8_t)iBlk8Idx, (uint8_t)pWelsMd->uiRef,
@@ -1915,7 +1978,24 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
             4, 4); //Cb
         pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCr + iMvStride, iLineSizeRefUV, pTmpDstCr, 8, pMv->iMvX, pMv->iMvY,
             4, 4); //Cr
-        break;
+        /* C.8.7 v1.1 chroma cascade-break (P_8x8 partition i, 4×4 each).
+         * Stash slot at (dst_x=iBlk4X, dst_y=iBlk4Y). */
+        if (PhasmStegoGetEncPreEmit() != NULL) {
+          uint8_t phasm_h4_clean_cb[16], phasm_h4_clean_cr[16];
+          const int32_t phasm_h4_clean_uv_stride =
+            (phasm_h4_clean_mvy >> 3) * iLineSizeRefUV + (phasm_h4_clean_mvx >> 3);
+          pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCb + phasm_h4_clean_uv_stride,
+                                                       iLineSizeRefUV,
+                                                       phasm_h4_clean_cb, 4,
+                                                       phasm_h4_clean_mvx, phasm_h4_clean_mvy, 4, 4);
+          pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCr + phasm_h4_clean_uv_stride,
+                                                       iLineSizeRefUV,
+                                                       phasm_h4_clean_cr, 4,
+                                                       phasm_h4_clean_mvx, phasm_h4_clean_mvy, 4, 4);
+          phasm_stash_mv_clean_mc_chroma_slot(0, iBlk4X, iBlk4Y, 4, 4, phasm_h4_clean_cb, 4);
+          phasm_stash_mv_clean_mc_chroma_slot(1, iBlk4X, iBlk4Y, 4, 4, phasm_h4_clean_cr, 4);
+        }
+        break; }
       case SUB_MB_TYPE_4x4:
         sMeRefine.pfCopyBlockByMode = pFunc->pfCopy4x4;
         //luma
