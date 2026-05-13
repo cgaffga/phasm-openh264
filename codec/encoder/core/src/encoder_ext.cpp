@@ -2830,6 +2830,31 @@ static inline void PrefetchReferencePicture (sWelsEncCtx* pCtx, const EVideoFram
   assert (kiSliceCount > 0);
   if (keFrameType != videoFrameTypeIDR) {
     assert (pCtx->iNumRef0 > 0);
+    /* phasm-stego C.8.9: per-frame ME ref attachment safety.
+     * pCtx->pRefList0[0] feeds directly into pCurDqLayer->pRefPic,
+     * which is the SOURCE for next-frame ME pixel reads
+     * (svc_base_layer_md.cpp:413-415). It MUST come from pRef[]
+     * (clean encoder reconstruction), NEVER from pVisualRef[].
+     * Scan all dependency layers' pVisualRef arrays and abort if
+     * any slot equals pCtx->pRefList0[0]. Highest-leverage check
+     * per the C.8.0 audit §4.4. */
+    {
+      SPicture* const phasm_check_pic = pCtx->pRefList0[0];
+      const int32_t phasm_max_did = pCtx->pSvcParam->iSpatialLayerNum;
+      for (int32_t phasm_d = 0; phasm_d < phasm_max_did; ++phasm_d) {
+        SRefList* phasm_check_list = pCtx->ppRefPicListExt[phasm_d];
+        if (phasm_check_list == NULL) continue;
+        for (int32_t phasm_slot = 0; phasm_slot <= MAX_REF_PIC_COUNT; ++phasm_slot) {
+          if (phasm_check_list->pVisualRef[phasm_slot] == phasm_check_pic) {
+            WelsLog (&pCtx->sLogCtx, WELS_LOG_ERROR,
+                     "C.8.9 INVARIANT BREACH: pRefList0[0] at ME attachment is a pVisualRef[] slot (iDid=%d, iSlot=%d) — cascade leak.",
+                     phasm_d, phasm_slot);
+            assert (false && "C.8.9: pVisualRef leaked into pRefList0[0]");
+            abort();
+          }
+        }
+      }
+    }
     pCtx->pRefPic               = pCtx->pRefList0[0];   // always get item 0 due to reordering done
     pCtx->pCurDqLayer->pRefPic  = pCtx->pRefPic;
     uiRefIdx                    = 0;                    // reordered reference iIndex

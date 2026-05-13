@@ -400,6 +400,30 @@ bool WelsUpdateRefList (sWelsEncCtx* pCtx) {
     for (iRefIdx = pRefList->uiShortRefCount - 1; iRefIdx >= 0; --iRefIdx) {
       pRefList->pShortRefList[iRefIdx + 1] = pRefList->pShortRefList[iRefIdx];
     }
+    /* phasm-stego C.8.9: short-ref DPB promotion safety. pCtx->pDecPic
+     * must come from pRef[] (clean encoder reconstruction), NEVER from
+     * pVisualRef[] (stego mirror). pVisualRef[] is held in a parallel
+     * pool and only assigned via pVisualNextBuffer / pVisualDecPic; it
+     * MUST NEVER leak into pShortRefList. A breach would cascade stego
+     * pixels into next-frame ME and break the v1.0 cascade-safety
+     * property. Runtime check: scan all dependency layers' pVisualRef
+     * arrays and abort if any slot equals pCtx->pDecPic. */
+    {
+      const int32_t kiMaxDid = pCtx->pSvcParam->iSpatialLayerNum;
+      for (int32_t iDid = 0; iDid < kiMaxDid; ++iDid) {
+        SRefList* pCheckList = pCtx->ppRefPicListExt[iDid];
+        if (pCheckList == NULL) continue;
+        for (int32_t iSlot = 0; iSlot <= MAX_REF_PIC_COUNT; ++iSlot) {
+          if (pCheckList->pVisualRef[iSlot] == pCtx->pDecPic) {
+            WelsLog (&pCtx->sLogCtx, WELS_LOG_ERROR,
+                     "C.8.9 INVARIANT BREACH: pDecPic at DPB short-ref promotion is a pVisualRef[] slot (iDid=%d, iSlot=%d) — cascade leak.",
+                     iDid, iSlot);
+            assert (false && "C.8.9: pVisualRef leaked into pShortRefList");
+            abort();
+          }
+        }
+      }
+    }
     pRefList->pShortRefList[0] = pCtx->pDecPic;
     pRefList->uiShortRefCount++;
   }
