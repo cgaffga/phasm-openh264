@@ -1649,6 +1649,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
 
   int32_t i, j, iIdx, iPixStride;
 
+  /* C.8.7 — clean-MV components captured at HOOK-H1 site, consumed by
+   * chroma half. Declared at function scope so other switch cases
+   * don't accidentally "jump past" them (C++ switch scoping rule). */
+  int16_t phasm_h1_mvx_clean = 0;
+  int16_t phasm_h1_mvy_clean = 0;
+
   uint8_t* pRefCb = pMbCache->SPicData.pRefMb[1];
   uint8_t* pRefCr = pMbCache->SPicData.pRefMb[2];
   uint8_t* pDstCb = pMbCache->pMemPredChroma;
@@ -1694,6 +1700,13 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
      * non-zero MVD component (X then Y) and PHASM_DOMAIN_MVD_SUFFIX_LSB
      * when |MVD| >= 9. Overrides only commit if the result doesn't
      * collide with PredSkipMv. */
+    /* C.8.7 default-off: every P MB clears the MV-override-active flag at
+     * entry so OutputPMb only applies the cascade-break shift on the MBs
+     * where HOOK-H1 actually fired. */
+    phasm_set_mv_override_active(0);
+    phasm_h1_mvx_clean = pWelsMd->sMe.sMe16x16.sMv.iMvX;
+    phasm_h1_mvy_clean = pWelsMd->sMe.sMe16x16.sMv.iMvY;
+
     if (PhasmStegoGetEncPreEmit() != NULL) {
       SMVUnitXY phasm_pred_skip;
       PredSkipMv(pMbCache, &phasm_pred_skip);
@@ -1727,6 +1740,19 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
                                      pWelsMd->sMe.sMe16x16.sMv.iMvX,
                                      pWelsMd->sMe.sMe16x16.sMv.iMvY,
                                      16, 16);
+        /* C.8.7 cascade-break: also MC at the CLEAN (pre-override) MV
+         * into a packed 256-byte stash so OutputPMb can shift pDecPic
+         * by (CLEAN_MC − STEGO_MC) and restore a clean encoder
+         * reference. Stride 16 (packed). */
+        uint8_t phasm_h1_clean_mc_luma[256];
+        pFunc->sMcFuncs.pMcLumaFunc(pMbCache->SPicData.pRefMb[0],
+                                     pCurDqLayer->pRefPic->iLineSize[0],
+                                     phasm_h1_clean_mc_luma, 16,
+                                     phasm_h1_mvx_clean,
+                                     phasm_h1_mvy_clean,
+                                     16, 16);
+        phasm_stash_mv_clean_mc_luma(phasm_h1_clean_mc_luma);
+        phasm_set_mv_override_active(1);
       }
     }
 
@@ -1742,6 +1768,32 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
     iMvStride = (pMv->iMvY >> 3) * iLineSizeRefUV + (pMv->iMvX >> 3);
     pTmpRefCb = pRefCb + iMvStride;
     pTmpRefCr = pRefCr + iMvStride;
+    /* C.8.7 cascade-break (chroma half): if HOOK-H1 mutated the MV, the
+     * chroma MC below would also pick up the STEGO MV (chroma reads the
+     * same luma MV). Capture the CLEAN-MV chroma MC into packed 8x8
+     * stashes BEFORE the live (stego) chroma MC, so OutputPMb can shift
+     * pDecPic chroma planes back to clean. Inactive flag → skip; no
+     * cost / no state mutation. */
+    if (phasm_get_mv_override_active()) {
+      const int32_t phasm_h1_clean_mv_stride =
+        (phasm_h1_mvy_clean >> 3) * iLineSizeRefUV + (phasm_h1_mvx_clean >> 3);
+      uint8_t phasm_h1_clean_mc_cb[64];
+      uint8_t phasm_h1_clean_mc_cr[64];
+      pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCb + phasm_h1_clean_mv_stride,
+                                                    iLineSizeRefUV,
+                                                    phasm_h1_clean_mc_cb, 8,
+                                                    phasm_h1_mvx_clean,
+                                                    phasm_h1_mvy_clean,
+                                                    8, 8);
+      pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pRefCr + phasm_h1_clean_mv_stride,
+                                                    iLineSizeRefUV,
+                                                    phasm_h1_clean_mc_cr, 8,
+                                                    phasm_h1_mvx_clean,
+                                                    phasm_h1_mvy_clean,
+                                                    8, 8);
+      phasm_stash_mv_clean_mc_chroma(0, phasm_h1_clean_mc_cb);
+      phasm_stash_mv_clean_mc_chroma(1, phasm_h1_clean_mc_cr);
+    }
     pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCb, iLineSizeRefUV, pDstCb, 8, pMv->iMvX, pMv->iMvY, 8, 8); //Cb
     pEncCtx->pFuncList->sMcFuncs.pMcChromaFunc (pTmpRefCr, iLineSizeRefUV, pDstCr, 8, pMv->iMvX, pMv->iMvY, 8, 8); //Cr
 

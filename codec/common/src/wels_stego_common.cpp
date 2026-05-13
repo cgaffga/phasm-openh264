@@ -120,6 +120,22 @@ int16_t g_phasm_chroma_clean_pres[2][64] = {{0}, {0}};
 // 4 8x8 blocks × 64 entries (matches WelsIDctT4RecOnMb's coefficient
 // layout). Single-threaded encoder default (#339 tracks revisit).
 int16_t g_phasm_p_luma_clean_pres[256] = {0};
+
+// C.8.7 MvdSign cascade-break stashes: when a P_16x16 MV is mutated by
+// HOOK-H1 (apply_mvd_sign_override), the encoder's MC pred buffer is
+// re-computed at the STEGO MV so the wire is internally consistent. But
+// the encoder's pDecPic then carries STEGO_MC + residual = polluted
+// reference for next-frame ME. To cascade-break: also compute MC at the
+// CLEAN (pre-override) MV into these stashes; OutputPMb later shifts
+// pDecPic by (CLEAN_MC − STEGO_MC) so the encoder reference stays clean,
+// while pVisualRecPic captures the actual decoder reconstruction.
+//
+// Active flag is sticky per-MB: HOOK-H1 sets to 1 if it fires; OutputPMb
+// clears to 0 after consuming. 256 bytes luma, 64+64 chroma; matches the
+// MC pred layout passed to pMcLumaFunc / pMcChromaFunc with stride 16/8.
+uint8_t g_phasm_mv_clean_mc_luma[256] = {0};
+uint8_t g_phasm_mv_clean_mc_chroma[2][64] = {{0}, {0}};
+int     g_phasm_mv_override_active = 0;
 }  // namespace
 
 extern "C" {
@@ -141,6 +157,33 @@ void phasm_stash_p_luma_clean_pres(const int16_t* clean_pres256) {
 
 const int16_t* phasm_get_p_luma_clean_pres(void) {
   return g_phasm_p_luma_clean_pres;
+}
+
+void phasm_set_mv_override_active(int active) {
+  g_phasm_mv_override_active = (active != 0) ? 1 : 0;
+}
+
+int phasm_get_mv_override_active(void) {
+  return g_phasm_mv_override_active;
+}
+
+void phasm_stash_mv_clean_mc_luma(const uint8_t* clean_mc_256) {
+  if (clean_mc_256 == nullptr) return;
+  std::memcpy(g_phasm_mv_clean_mc_luma, clean_mc_256, 256);
+}
+
+const uint8_t* phasm_get_mv_clean_mc_luma(void) {
+  return g_phasm_mv_clean_mc_luma;
+}
+
+void phasm_stash_mv_clean_mc_chroma(int32_t iUV, const uint8_t* clean_mc_64) {
+  if (iUV < 0 || iUV > 1 || clean_mc_64 == nullptr) return;
+  std::memcpy(g_phasm_mv_clean_mc_chroma[iUV], clean_mc_64, 64);
+}
+
+const uint8_t* phasm_get_mv_clean_mc_chroma(int32_t iUV) {
+  if (iUV < 0 || iUV > 1) return nullptr;
+  return g_phasm_mv_clean_mc_chroma[iUV];
 }
 
 // ---------------------------------------------------------------------
