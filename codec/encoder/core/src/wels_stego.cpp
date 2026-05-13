@@ -15,9 +15,30 @@
 #include "wels_stego.h"
 #include "wels_stego_internal.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+
+// =====================================================================
+// Phase C.8.13(b) debug counters (#455).
+//
+// Atomic counters for `phasm_apply_coeff_hooks_dual` to narrow the
+// residual cascade-leak. Read via `phasm_get_hook_dual_*` extern "C"
+// getters; reset via `phasm_reset_hook_dual_counters`.
+//
+// These have zero impact when the stego callbacks aren't registered
+// (we increment unconditionally on the dual-write path, but that path
+// is only ever entered when an enc_pre_emit callback exists). Cost is
+// ~3 ns/fire amortised — negligible vs the surrounding quant+scan
+// work. Stays in the source long-term; counters are an ABI-compatible
+// addition (new symbols, no struct changes).
+// =====================================================================
+
+static std::atomic<uint64_t> g_phasm_hook_dual_fires_total{0};
+static std::atomic<uint64_t> g_phasm_hook_dual_bail_level_a_zero{0};
+static std::atomic<uint64_t> g_phasm_hook_dual_bail_level_mismatch{0};
+static std::atomic<uint64_t> g_phasm_hook_dual_applied{0};
 
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
@@ -142,10 +163,22 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
                                  int16_t* level_a,
                                  int16_t* level_b) {
   if (level_a == nullptr || level_b == nullptr) return 0;
-  if (*level_a == 0) return 0;
   if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
 
-  if (*level_a != *level_b) return 0;
+  // C.8.13(b) #455 — count total dual-write fires that pass the
+  // null + callback-registered gates so the bail rates below are
+  // meaningful denominators.
+  g_phasm_hook_dual_fires_total.fetch_add(1, std::memory_order_relaxed);
+
+  if (*level_a == 0) {
+    g_phasm_hook_dual_bail_level_a_zero.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+  }
+
+  if (*level_a != *level_b) {
+    g_phasm_hook_dual_bail_level_mismatch.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+  }
 
   int16_t old_level = *level_a;
   int16_t new_level = apply_coeff_hooks_to_level(pos_template, sub_block,
@@ -154,9 +187,37 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
   if (new_level != old_level) {
     *level_a = new_level;
     *level_b = new_level;
+    g_phasm_hook_dual_applied.fetch_add(1, std::memory_order_relaxed);
     return 1;
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------
+// Phase C.8.13(b) (#455) — debug counters for dual-write hook narrowing.
+// ---------------------------------------------------------------------
+
+uint64_t phasm_get_hook_dual_fires_total(void) {
+  return g_phasm_hook_dual_fires_total.load(std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_dual_bail_level_a_zero(void) {
+  return g_phasm_hook_dual_bail_level_a_zero.load(std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_dual_bail_level_mismatch(void) {
+  return g_phasm_hook_dual_bail_level_mismatch.load(std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_dual_applied(void) {
+  return g_phasm_hook_dual_applied.load(std::memory_order_relaxed);
+}
+
+void phasm_reset_hook_dual_counters(void) {
+  g_phasm_hook_dual_fires_total.store(0, std::memory_order_relaxed);
+  g_phasm_hook_dual_bail_level_a_zero.store(0, std::memory_order_relaxed);
+  g_phasm_hook_dual_bail_level_mismatch.store(0, std::memory_order_relaxed);
+  g_phasm_hook_dual_applied.store(0, std::memory_order_relaxed);
 }
 
 int phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,

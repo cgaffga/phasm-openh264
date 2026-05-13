@@ -342,6 +342,26 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
 #define PHASM_STEGO_ABI_VERSION 0x010200u
 uint32_t WelsStegoAbiVersion(void);
 
+/* ---------------------------------------------------------------------
+ * 11. Phase C.8.13(b) debug counters (#455)
+ *
+ * Atomic counters for `phasm_apply_coeff_hooks_dual` to narrow the
+ * residual cascade-leak. All read-only from the host; reset via the
+ * dedicated entry point. Counters increment on the hook helper hot
+ * path with `std::memory_order_relaxed` — ~3 ns/fire overhead, kept
+ * unconditional so the host doesn't need a build flag to enable.
+ *
+ * Usage: encode once, read counters, compare against observed wire
+ * divergences. If `mismatch_bails == diverge_count`, the precondition
+ * is the leak. If 0, look elsewhere (RDO sim, JVT-O079 boundary, …).
+ * ------------------------------------------------------------------ */
+
+uint64_t phasm_get_hook_dual_fires_total(void);
+uint64_t phasm_get_hook_dual_bail_level_a_zero(void);
+uint64_t phasm_get_hook_dual_bail_level_mismatch(void);
+uint64_t phasm_get_hook_dual_applied(void);
+void     phasm_reset_hook_dual_counters(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
