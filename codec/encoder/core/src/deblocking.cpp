@@ -690,7 +690,16 @@ void  DeblockingFilterFrameAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc) {
   }
 }
 
-void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SSlice* pSlice) {
+/* C.8.8 dual-pass helper: deblock-loop a single slice over a specific
+ * picture (luma + chroma). Pixel data + strides come from pPicData/
+ * pLineSize (caller picks either pDecPic or pVisualRecPic). Boundary
+ * strengths come from the SMB syntax via DeblockingMbAvcbase, which
+ * is identical for both buffers. Single-threaded encoder default
+ * (#339 multi-thread revisit). */
+static void DeblockingFilterSlicePictureAvcbase (
+    SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SSlice* pSlice,
+    uint8_t* pPlaneY, uint8_t* pPlaneU, uint8_t* pPlaneV,
+    const int32_t kiStrideY, const int32_t kiStrideU, const int32_t kiStrideV) {
   SMB* pMbList                          = pCurDq->sMbDataP;
   SSliceHeaderExt* sSliceHeaderExt      = &pSlice->sSliceHeaderExt;
   SMB* pCurrentMbBlock;
@@ -700,16 +709,11 @@ void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SS
   const int32_t kiTotalNumMb            = kiMbWidth * kiMbHeight;
   int32_t iCurMbIdx = 0, iNextMbIdx = 0, iNumMbFiltered = 0;
 
-  /* Step1: parameters set */
-  if (sSliceHeaderExt->sSliceHeader.uiDisableDeblockingFilterIdc == 1)
-    return;
-
   SDeblockingFilter pFilter;
-
   pFilter.uiFilterIdc = (sSliceHeaderExt->sSliceHeader.uiDisableDeblockingFilterIdc != 0);
-  pFilter.iCsStride[0] = pCurDq->pDecPic->iLineSize[0];
-  pFilter.iCsStride[1] = pCurDq->pDecPic->iLineSize[1];
-  pFilter.iCsStride[2] = pCurDq->pDecPic->iLineSize[2];
+  pFilter.iCsStride[0] = kiStrideY;
+  pFilter.iCsStride[1] = kiStrideU;
+  pFilter.iCsStride[2] = kiStrideV;
   pFilter.iSliceAlphaC0Offset = sSliceHeaderExt->sSliceHeader.iSliceAlphaC0Offset;
   pFilter.iSliceBetaOffset    = sSliceHeaderExt->sSliceHeader.iSliceBetaOffset;
   pFilter.iMbStride           = kiMbWidth;
@@ -720,12 +724,9 @@ void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SS
     iCurMbIdx       = iNextMbIdx;
     pCurrentMbBlock = &pMbList[ iCurMbIdx ];
 
-    pFilter.pCsData[0] = pCurDq->pDecPic->pData[0] + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[0])
-                         << 4);
-    pFilter.pCsData[1] = pCurDq->pDecPic->pData[1] + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[1])
-                         << 3);
-    pFilter.pCsData[2] = pCurDq->pDecPic->pData[2] + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[2])
-                         << 3);
+    pFilter.pCsData[0] = pPlaneY + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[0]) << 4);
+    pFilter.pCsData[1] = pPlaneU + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[1]) << 3);
+    pFilter.pCsData[2] = pPlaneV + ((pCurrentMbBlock->iMbX + pCurrentMbBlock->iMbY * pFilter.iCsStride[2]) << 3);
 
     DeblockingMbAvcbase (pFunc, pCurrentMbBlock, &pFilter);
 
@@ -735,6 +736,32 @@ void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SS
     if (iNextMbIdx == -1 || iNextMbIdx >= kiTotalNumMb || iNumMbFiltered >= kiTotalNumMb) {
       break;
     }
+  }
+}
+
+void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SSlice* pSlice) {
+  /* Step1: parameters set */
+  if (pSlice->sSliceHeaderExt.sSliceHeader.uiDisableDeblockingFilterIdc == 1)
+    return;
+
+  /* Pass 1: deblock the encoder reference (pDecPic). Encoder uses this
+   * for next-frame ME so it MUST be deblocked per H.264 spec § 8.7. */
+  DeblockingFilterSlicePictureAvcbase(
+      pCurDq, pFunc, pSlice,
+      pCurDq->pDecPic->pData[0], pCurDq->pDecPic->pData[1], pCurDq->pDecPic->pData[2],
+      pCurDq->pDecPic->iLineSize[0], pCurDq->pDecPic->iLineSize[1], pCurDq->pDecPic->iLineSize[2]);
+
+  /* C.8.8 dual-pass: also deblock pVisualRecPic when stego is active.
+   * Same boundary strengths (BS comes from SMB syntax — identical),
+   * different pixel content. Result is a decoder-equivalent
+   * reconstruction including the deblock filter, so the mp4 output
+   * (which reads pVisualRecPic per C.8.10) matches what a downstream
+   * decoder produces. Skip-on-clean optimisation deferred to C.9.2. */
+  if (pCurDq->pVisualRecPic != NULL) {
+    DeblockingFilterSlicePictureAvcbase(
+        pCurDq, pFunc, pSlice,
+        pCurDq->pVisualRecPic->pData[0], pCurDq->pVisualRecPic->pData[1], pCurDq->pVisualRecPic->pData[2],
+        pCurDq->pVisualRecPic->iLineSize[0], pCurDq->pVisualRecPic->iLineSize[1], pCurDq->pVisualRecPic->iLineSize[2]);
   }
 }
 
