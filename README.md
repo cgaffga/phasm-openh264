@@ -29,13 +29,15 @@ fork is not a general-purpose codec replacement.
 - **v1.0 state:** hook ABI and dual-recon are stable. Pinned at fork
   branch `phasm-stego`. Tagged as `phasm-stego-v0.1.0` for the
   hook-surface freeze.
-- **Known v1.0 issue (under investigation):** production round-trip
-  via the Rust consumer crate shows a ~0.003% wire-bit divergence at
-  100+ flip plans. Tracked downstream as **C.8.13(b)** — orchestrator-
-  side cascade leak under stress, not a fork-side ABI bug per se.
-  Cascade-safety assertions (C.8.9) and multi-frame verification
-  (C.8.11, 3 IDRs × 24 frames, 0 leaks across 128 730 blocks) are
-  green inside the fork's own gate.
+- **C.8.13(b) CLOSED 2026-05-13:** the round-trip flake was two
+  bugs — one fork-side, one orchestrator-side. (1) HOOK-F (P-luma
+  inter dual-write) was passing `coeff_idx_scanned` where the
+  consumer's BC=2 canonical-key translation expected raster
+  (fork commit `222457ce`, closed ~32%). (2) The remaining ~68% was
+  a Rust-side mb_type filter race between `md_cost` (fires after
+  the hook) and HOOK-F (reads pre-frame mb_type), fixed
+  downstream by bypassing the filter. 32-seed audit went 38 → 26 →
+  **0** divergences. All consumer round-trip tests green.
 
 ## What this fork adds
 
