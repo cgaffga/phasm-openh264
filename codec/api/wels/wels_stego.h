@@ -362,6 +362,15 @@ uint64_t phasm_get_hook_dual_bail_level_mismatch(void);
 uint64_t phasm_get_hook_dual_applied(void);
 void     phasm_reset_hook_dual_counters(void);
 
+/* Single-write helper counters (HOOK-A I_16x16 DC, HOOK-B I_16x16 AC,
+ * HOOK-E I_4x4). HOOK-E in particular is the suspect for the residual
+ * cascade leak — when a P-frame MB picks the I_4x4 intra mode as its
+ * winning candidate, HOOK-E runs instead of HOOK-F. `phasm_reset_hook
+ * _dual_counters` resets the single-write counters too. */
+uint64_t phasm_get_hook_single_fires_total(void);
+uint64_t phasm_get_hook_single_bail_level_zero(void);
+uint64_t phasm_get_hook_single_applied(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

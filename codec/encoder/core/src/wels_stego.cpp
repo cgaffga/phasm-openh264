@@ -40,6 +40,14 @@ static std::atomic<uint64_t> g_phasm_hook_dual_bail_level_a_zero{0};
 static std::atomic<uint64_t> g_phasm_hook_dual_bail_level_mismatch{0};
 static std::atomic<uint64_t> g_phasm_hook_dual_applied{0};
 
+// Single-write helper (HOOK-A/B/E for intra) gets its own counters.
+// HOOK-E fires for I_4x4 intra Luma — and may be the path producing the
+// residual missed-flip divergences if the MB's winning mode was intra
+// rather than inter in a P-frame.
+static std::atomic<uint64_t> g_phasm_hook_single_fires_total{0};
+static std::atomic<uint64_t> g_phasm_hook_single_bail_level_zero{0};
+static std::atomic<uint64_t> g_phasm_hook_single_applied{0};
+
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
 //
@@ -147,13 +155,24 @@ int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                             uint8_t coeff_idx_scanned,
                             uint8_t block_cat,
                             int16_t* level) {
-  if (level == nullptr || *level == 0) return 0;
+  if (level == nullptr) return 0;
   if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
+
+  g_phasm_hook_single_fires_total.fetch_add(1, std::memory_order_relaxed);
+  if (*level == 0) {
+    g_phasm_hook_single_bail_level_zero.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+  }
+
   int16_t old_level = *level;
   *level = apply_coeff_hooks_to_level(pos_template, sub_block,
                                       coeff_idx_scanned, block_cat,
                                       old_level);
-  return (*level != old_level) ? 1 : 0;
+  if (*level != old_level) {
+    g_phasm_hook_single_applied.fetch_add(1, std::memory_order_relaxed);
+    return 1;
+  }
+  return 0;
 }
 
 int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
@@ -218,6 +237,23 @@ void phasm_reset_hook_dual_counters(void) {
   g_phasm_hook_dual_bail_level_a_zero.store(0, std::memory_order_relaxed);
   g_phasm_hook_dual_bail_level_mismatch.store(0, std::memory_order_relaxed);
   g_phasm_hook_dual_applied.store(0, std::memory_order_relaxed);
+  // Reset the single-write counters in the same call — callers use one
+  // function before each measured encode.
+  g_phasm_hook_single_fires_total.store(0, std::memory_order_relaxed);
+  g_phasm_hook_single_bail_level_zero.store(0, std::memory_order_relaxed);
+  g_phasm_hook_single_applied.store(0, std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_single_fires_total(void) {
+  return g_phasm_hook_single_fires_total.load(std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_single_bail_level_zero(void) {
+  return g_phasm_hook_single_bail_level_zero.load(std::memory_order_relaxed);
+}
+
+uint64_t phasm_get_hook_single_applied(void) {
+  return g_phasm_hook_single_applied.load(std::memory_order_relaxed);
 }
 
 int phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
