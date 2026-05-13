@@ -477,15 +477,67 @@ void WelsIMbChromaEncode (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache)
   uint8_t* pCsCb                = pMbCache->SPicData.pCsMb[1];
   uint8_t* pCsCr                = pMbCache->SPicData.pCsMb[2];
 
+  /* phasm-stego C.8.5 dual-recon for intra chroma (Site C-3). After the
+   * existing pfIDctFourT4 writes STEGO chroma pixels into pCsCb/pCsCr
+   * (= pDecPic chroma at the current MB offset), snapshot the stego
+   * block, re-run pfIDctFourT4 with the CLEAN coeffs stashed by
+   * WelsEncRecUV (overwriting pCsCb/pCsCr with CLEAN), and mirror the
+   * stego snapshot into pVisualRecPic via phasm_dual_recon_writeback. */
+  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+                               && (pCurLayer->pVisualRecPic != NULL);
+
   //cb
   pFunc->pfDctFourT4 (pCurRS,    pMbCache->SPicData.pEncMb[1], kiEncStride, pBestPred,    8);
   WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS,    1);
   pFunc->pfIDctFourT4 (pCsCb, kiCsStride, pBestPred,    8, pCurRS);
 
+  if (phasm_dr_active) {
+    uint8_t phasm_dr_stego_cb[64];
+    for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
+      memcpy(phasm_dr_stego_cb + phasm_y * 8,
+             pCsCb + (size_t)phasm_y * (size_t)kiCsStride, 8);
+    }
+    /* Defensive local copy of stash. */
+    const int16_t* clean_pres_cb = phasm_get_chroma_clean_pres(0);
+    if (clean_pres_cb != NULL) {
+      int16_t clean_cb_work[64];
+      memcpy(clean_cb_work, clean_pres_cb, sizeof(int16_t) * 64);
+      pFunc->pfIDctFourT4 (pCsCb, kiCsStride, pBestPred, 8, clean_cb_work);
+    }
+    const ptrdiff_t plane_off = pCsCb - pCurLayer->pCsData[1];
+    phasm_dual_recon_writeback (
+        (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/1,
+        (int32_t)(plane_off % kiCsStride),
+        (int32_t)(plane_off / kiCsStride),
+        8, 8, NULL, pCurLayer->pVisualRecPic->pData[1], kiCsStride,
+        NULL, phasm_dr_stego_cb, /*src_stride=*/8);
+  }
+
   //cr
   pFunc->pfDctFourT4 (pCurRS + 64, pMbCache->SPicData.pEncMb[2], kiEncStride, pBestPred + 64, 8);
   WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS + 64, 2);
   pFunc->pfIDctFourT4 (pCsCr, kiCsStride, pBestPred + 64, 8, pCurRS + 64);
+
+  if (phasm_dr_active) {
+    uint8_t phasm_dr_stego_cr[64];
+    for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
+      memcpy(phasm_dr_stego_cr + phasm_y * 8,
+             pCsCr + (size_t)phasm_y * (size_t)kiCsStride, 8);
+    }
+    const int16_t* clean_pres_cr = phasm_get_chroma_clean_pres(1);
+    if (clean_pres_cr != NULL) {
+      int16_t clean_cr_work[64];
+      memcpy(clean_cr_work, clean_pres_cr, sizeof(int16_t) * 64);
+      pFunc->pfIDctFourT4 (pCsCr, kiCsStride, pBestPred + 64, 8, clean_cr_work);
+    }
+    const ptrdiff_t plane_off = pCsCr - pCurLayer->pCsData[2];
+    phasm_dual_recon_writeback (
+        (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/2,
+        (int32_t)(plane_off % kiCsStride),
+        (int32_t)(plane_off / kiCsStride),
+        8, 8, NULL, pCurLayer->pVisualRecPic->pData[2], kiCsStride,
+        NULL, phasm_dr_stego_cr, 8);
+  }
 }
 
 
@@ -518,9 +570,69 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
     const int32_t kiDecStrideChroma     = pDq->pDecPic->iLineSize[1];
     PIDctFunc pfIdctFour4x4             = pCtx->pFuncList->pfIDctFourT4;
 
+    /* phasm-stego C.8.5: inter chroma dual-recon. The chroma IDCTs are
+     * IN-PLACE (input pDecU/pDecV is the MC prediction; output overwrites
+     * it). We snapshot the MC pred, run the live STEGO IDCT, snapshot
+     * stego pixels, restore the pred, then re-run IDCT with the CLEAN
+     * coeffs stashed by WelsEncRecUV in WelsPMbChromaEncode. Final state
+     * of pDecU/pDecV is CLEAN; the stego snapshot mirrors into
+     * pVisualRecPic via phasm_dual_recon_writeback. Luma dual-recon at
+     * this site ships in C.8.6 (HOOK-F + WelsIDctT4RecOnMb). */
+    const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+                                 && (pDq->pVisualRecPic != NULL);
+    uint8_t phasm_dr_pred_u[64], phasm_dr_pred_v[64];
+    if (phasm_dr_active) {
+      for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
+        memcpy(phasm_dr_pred_u + phasm_y * 8,
+               pDecU + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+        memcpy(phasm_dr_pred_v + phasm_y * 8,
+               pDecV + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+      }
+    }
+
     WelsIDctT4RecOnMb (pDecY, kiDecStrideLuma, pDecY, kiDecStrideLuma, pScaledTcoeff,  pfIdctFour4x4);
     pfIdctFour4x4 (pDecU, kiDecStrideChroma, pDecU, kiDecStrideChroma, pScaledTcoeff + 256);
     pfIdctFour4x4 (pDecV, kiDecStrideChroma, pDecV, kiDecStrideChroma, pScaledTcoeff + 320);
+
+    if (phasm_dr_active) {
+      uint8_t phasm_dr_stego_u[64], phasm_dr_stego_v[64];
+      for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
+        memcpy(phasm_dr_stego_u + phasm_y * 8,
+               pDecU + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+        memcpy(phasm_dr_stego_v + phasm_y * 8,
+               pDecV + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+        memcpy(pDecU + (size_t)phasm_y * (size_t)kiDecStrideChroma,
+               phasm_dr_pred_u + phasm_y * 8, 8);
+        memcpy(pDecV + (size_t)phasm_y * (size_t)kiDecStrideChroma,
+               phasm_dr_pred_v + phasm_y * 8, 8);
+      }
+      const int16_t* clean_u = phasm_get_chroma_clean_pres(0);
+      const int16_t* clean_v = phasm_get_chroma_clean_pres(1);
+      if (clean_u != NULL) {
+        int16_t clean_u_work[64];
+        memcpy(clean_u_work, clean_u, sizeof(int16_t) * 64);
+        pfIdctFour4x4 (pDecU, kiDecStrideChroma, pDecU, kiDecStrideChroma, clean_u_work);
+      }
+      if (clean_v != NULL) {
+        int16_t clean_v_work[64];
+        memcpy(clean_v_work, clean_v, sizeof(int16_t) * 64);
+        pfIdctFour4x4 (pDecV, kiDecStrideChroma, pDecV, kiDecStrideChroma, clean_v_work);
+      }
+      const ptrdiff_t plane_off_u = pDecU - pDq->pDecPic->pData[1];
+      const ptrdiff_t plane_off_v = pDecV - pDq->pDecPic->pData[2];
+      phasm_dual_recon_writeback (
+          (uint16_t)pMb->iMbX, (uint16_t)pMb->iMbY, /*plane=*/1,
+          (int32_t)(plane_off_u % kiDecStrideChroma),
+          (int32_t)(plane_off_u / kiDecStrideChroma),
+          8, 8, NULL, pDq->pVisualRecPic->pData[1], kiDecStrideChroma,
+          NULL, phasm_dr_stego_u, 8);
+      phasm_dual_recon_writeback (
+          (uint16_t)pMb->iMbX, (uint16_t)pMb->iMbY, /*plane=*/2,
+          (int32_t)(plane_off_v % kiDecStrideChroma),
+          (int32_t)(plane_off_v / kiDecStrideChroma),
+          8, 8, NULL, pDq->pVisualRecPic->pData[2], kiDecStrideChroma,
+          NULL, phasm_dr_stego_v, 8);
+    }
   }
 }
 
