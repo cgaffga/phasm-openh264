@@ -52,6 +52,7 @@
 #include "ref_list_mgr_svc.h"
 #include "ls_defines.h"
 #include "crt_util_safe_x.h" // Safe CRT routines like utils for cross platforms
+#include "wels_stego_internal.h"  // phasm: PhasmStegoGetEncPreEmit (C.8.9 / C.8.10)
 #include "slice_multi_threading.h"
 #include "measure_time.h"
 #include "svc_set_mb_syn.h"
@@ -3670,7 +3671,18 @@ int32_t WelsEncoderEncodeExt (sWelsEncCtx* pCtx, SFrameBSInfo* pFbi, const SSour
 
     pCtx->pDecPic               = pCtx->ppRefPicListExt[iCurDid]->pNextBuffer;
     pCtx->pVisualDecPic         = pCtx->ppRefPicListExt[iCurDid]->pVisualNextBuffer; // phasm
-    fsnr                        = pCtx->pDecPic;
+    /* phasm-stego C.8.10: when stego is active, fsnr points at the
+     * stego mirror so any debug FRAME_DUMP and PSNR readback reflect
+     * the decoder-equivalent reconstruction (post-deblock, including
+     * C.8.3-9 cascade-safe writeback). The encoder library itself
+     * emits only the NAL bitstream; pVisualDecPic is the "what a
+     * decoder will see" reference. Non-stego encodes fall back to
+     * pDecPic (pVisualDecPic content would be stale from a prior
+     * frame since dual-recon writeback hadn't fired). */
+    fsnr                        = (PhasmStegoGetEncPreEmit() != NULL
+                                   && pCtx->pVisualDecPic != NULL)
+                                  ? pCtx->pVisualDecPic
+                                  : pCtx->pDecPic;
     pCtx->pDecPic->iPictureType = pCtx->eSliceType;
     pCtx->pDecPic->iFramePoc    = pParamInternal->iPOC;
 
