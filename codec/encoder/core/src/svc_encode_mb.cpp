@@ -354,11 +354,14 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
      *     MB offset. The clean side has already been written into pPred
      *     above (or never moved off pBestPred for CBP=0), so we pass
      *     clean_dst=NULL to the helper -- pDecPic doesn't need a second
-     *     memcpy. The dual_recon_observe callback intentionally does
-     *     NOT fire here (helper requires both clean+stego pointers); a
-     *     v1.1+ enhancement could snapshot the recomputed clean to pass
-     *     it through. */
+     *     memcpy. Snapshot pPred (post-recompute clean) compact so the
+     *     observe callback fires with both clean+stego pointers. */
     {
+      uint8_t phasm_dr_clean_recon[256];
+      for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
+        memcpy(phasm_dr_clean_recon + phasm_y * 16,
+               pPred + (size_t)phasm_y * (size_t)kiRecStride, 16);
+      }
       const int32_t phasm_dr_px = pCurMb->iMbX * 16;
       const int32_t phasm_dr_py = pCurMb->iMbY * 16;
       phasm_dual_recon_writeback (
@@ -367,7 +370,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
           /*clean_dst=*/NULL,
           /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
           /*dst_stride=*/kiRecStride,
-          /*clean_pixels=*/NULL,
+          /*clean_pixels=*/phasm_dr_clean_recon,
           /*stego_pixels=*/phasm_dr_stego_recon,
           /*src_stride=*/16);
     }
@@ -497,8 +500,15 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
 
     /* (3) Mirror stego sub-block into pVisualRecPic at the same byte
      *     offset. The two pictures share the same iLineSize so a single
-     *     sub-block offset (pPredI4x4 - pCsData[0]) maps both. */
+     *     sub-block offset (pPredI4x4 - pCsData[0]) maps both. Snapshot
+     *     pPredI4x4 (post-recompute clean) compact so observe callback
+     *     fires. */
     {
+      uint8_t phasm_dr_clean_i4x4[16];
+      for (int32_t phasm_y = 0; phasm_y < 4; ++phasm_y) {
+        memcpy(phasm_dr_clean_i4x4 + phasm_y * 4,
+               pPredI4x4 + (size_t)phasm_y * (size_t)iRecStride, 4);
+      }
       const ptrdiff_t phasm_dr_plane_off = pPredI4x4 - pCurDqLayer->pCsData[0];
       const int32_t phasm_dr_py = (int32_t)(phasm_dr_plane_off / iRecStride);
       const int32_t phasm_dr_px = (int32_t)(phasm_dr_plane_off % iRecStride);
@@ -508,7 +518,7 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
           /*clean_dst=*/NULL,
           /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
           /*dst_stride=*/iRecStride,
-          /*clean_pixels=*/NULL,
+          /*clean_pixels=*/phasm_dr_clean_i4x4,
           /*stego_pixels=*/phasm_dr_stego_i4x4,
           /*src_stride=*/4);
     }
@@ -923,7 +933,9 @@ void    WelsRecPskip (SDqLayer* pCurLayer, SWelsFuncPtrList* pFuncList, SMB* pCu
    * residual emitted -- clean == stego on all three planes. Just mirror
    * the same Skip prediction (which the existing pfCopy*Aligned calls
    * already wrote into pCsMb[0..2] = pDecPic) into pVisualRecPic at
-   * the same MB offset. */
+   * the same MB offset. Pass the same pSkipMb pointer as both clean +
+   * stego so the observe callback fires with identical buffers (Pskip
+   * has no perturbation by construction). */
   if (PhasmStegoGetEncPreEmit() != NULL && pCurLayer->pVisualRecPic != NULL) {
     int32_t* pStrideAll = pCurLayer->iCsStride;
     const ptrdiff_t y_off  = pCsMb[0] - pCurLayer->pCsData[0];
@@ -936,7 +948,7 @@ void    WelsRecPskip (SDqLayer* pCurLayer, SWelsFuncPtrList* pFuncList, SMB* pCu
                                 /*w=*/16, /*h=*/16,
                                 /*clean_dst=*/NULL,
                                 pCurLayer->pVisualRecPic->pData[0], pStrideAll[0],
-                                /*clean_pixels=*/NULL,
+                                pMbCache->pSkipMb,
                                 pMbCache->pSkipMb, /*src_stride=*/16);
     phasm_dual_recon_writeback ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
                                 /*plane=*/1,
@@ -944,14 +956,16 @@ void    WelsRecPskip (SDqLayer* pCurLayer, SWelsFuncPtrList* pFuncList, SMB* pCu
                                 (int32_t)(cb_off / pStrideAll[1]),
                                 8, 8, NULL,
                                 pCurLayer->pVisualRecPic->pData[1], pStrideAll[1],
-                                NULL, pMbCache->pSkipMb + 256, 8);
+                                pMbCache->pSkipMb + 256,
+                                pMbCache->pSkipMb + 256, 8);
     phasm_dual_recon_writeback ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
                                 /*plane=*/2,
                                 (int32_t)(cr_off % pStrideAll[2]),
                                 (int32_t)(cr_off / pStrideAll[2]),
                                 8, 8, NULL,
                                 pCurLayer->pVisualRecPic->pData[2], pStrideAll[2],
-                                NULL, pMbCache->pSkipMb + 320, 8);
+                                pMbCache->pSkipMb + 320,
+                                pMbCache->pSkipMb + 320, 8);
   }
 }
 
