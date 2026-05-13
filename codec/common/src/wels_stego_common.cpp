@@ -115,6 +115,11 @@ namespace {
 // plane × 2 planes = 256 bytes total. Single-threaded encoder default
 // (iMultipleThreadIdc=1), so a single process-global is safe.
 int16_t g_phasm_chroma_clean_pres[2][64] = {{0}, {0}};
+
+// P-frame luma per-MB clean snapshot stash (Phase C.8.6). 256 int16_t =
+// 4 8x8 blocks × 64 entries (matches WelsIDctT4RecOnMb's coefficient
+// layout). Single-threaded encoder default (#339 tracks revisit).
+int16_t g_phasm_p_luma_clean_pres[256] = {0};
 }  // namespace
 
 extern "C" {
@@ -127,6 +132,15 @@ void phasm_stash_chroma_clean_pres(int32_t iUV, const int16_t* clean_pres64) {
 const int16_t* phasm_get_chroma_clean_pres(int32_t iUV) {
   if (iUV < 0 || iUV > 1) return nullptr;
   return g_phasm_chroma_clean_pres[iUV];
+}
+
+void phasm_stash_p_luma_clean_pres(const int16_t* clean_pres256) {
+  if (clean_pres256 == nullptr) return;
+  std::memcpy(g_phasm_p_luma_clean_pres, clean_pres256, sizeof(int16_t) * 256);
+}
+
+const int16_t* phasm_get_p_luma_clean_pres(void) {
+  return g_phasm_p_luma_clean_pres;
 }
 
 // ---------------------------------------------------------------------

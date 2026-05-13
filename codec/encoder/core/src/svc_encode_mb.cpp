@@ -553,6 +553,16 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   pBlock -= 256;
   pRes -= 256;
 
+  /* phasm-stego C.8.6: snapshot CLEAN post-quant pre-HOOK-F luma pRes
+   * (256 int16_t = 16 4x4 sub-blocks). This is in QUANT domain; the
+   * stash recompute below will mirror suppression + dequant after the
+   * live path runs them. */
+  const bool phasm_dr_active_y = (PhasmStegoGetEncPreEmit() != NULL);
+  int16_t phasm_dr_clean_luma[256];
+  if (phasm_dr_active_y) {
+    memcpy(phasm_dr_clean_luma, pRes, sizeof(int16_t) * 256);
+  }
+
   /* phasm-stego HOOK-F: P luma inter, post-quant POST-scan, dual-array
    * writeback. Per the audit (openh264-hook-sites-inter-coeff.md), this
    * site sits between the scan loop above and the JVT-O079 suppression
@@ -627,6 +637,28 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
       }
       pRes += 64;
     }
+  }
+
+  /* phasm-stego C.8.6: mirror suppression + dequant on the clean
+   * snapshot (in QUANT domain after the snapshot above) so the stash
+   * holds the same DEQUANT-domain content that the IDCT site expects
+   * minus the HOOK-F sign/suffix overrides. Suppression decisions
+   * (iSingleCtrMb / iSingleCtr8x8) are based on PRE-hook counts which
+   * the hook contract preserves, so the suppression mask is identical
+   * between live and clean paths. */
+  if (phasm_dr_active_y) {
+    if (iSingleCtrMb < 6) {
+      memset(phasm_dr_clean_luma, 0, sizeof(int16_t) * 256);
+    } else {
+      for (i = 0; i < 4; i++) {
+        if (iSingleCtr8x8[i] >= 4) {
+          pfDequantizationFour4x4(phasm_dr_clean_luma + i * 64, g_kuiDequantCoeff[uiQp]);
+        } else {
+          memset(phasm_dr_clean_luma + i * 64, 0, sizeof(int16_t) * 64);
+        }
+      }
+    }
+    phasm_stash_p_luma_clean_pres(phasm_dr_clean_luma);
   }
 }
 

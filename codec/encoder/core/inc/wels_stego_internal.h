@@ -238,6 +238,20 @@ void phasm_dual_recon_writeback(uint16_t mb_x,
 void           phasm_stash_chroma_clean_pres(int32_t iUV, const int16_t* clean_pres64);
 const int16_t* phasm_get_chroma_clean_pres(int32_t iUV);
 
+/* ---------------------------------------------------------------------
+ * P-frame luma per-MB clean snapshot stash (Phase C.8.6)
+ *
+ * WelsEncInterY captures the clean post-quant + (mirror of suppression +
+ * dequant) luma residual (256 int16_t per MB = 4 8x8 blocks × 64 entries)
+ * into a process-global static. The IDCT-site caller in svc_encode_slice
+ * .cpp's OutputPMbWithoutConstructCsRsNoCopy reads it via
+ * `phasm_get_p_luma_clean_pres()` to recompute a clean luma
+ * reconstruction alongside the live stego one. Same scope rules as the
+ * chroma stash.
+ * ------------------------------------------------------------------ */
+void           phasm_stash_p_luma_clean_pres(const int16_t* clean_pres256);
+const int16_t* phasm_get_p_luma_clean_pres(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
