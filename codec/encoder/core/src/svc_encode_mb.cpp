@@ -609,6 +609,17 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
     phasm_pos_f.ref_idx       = 0xff;
     phasm_pos_f.mv_component  = 0xff;
     phasm_pos_f._reserved     = 0;
+    /* phasm-stego C.8.13(b) fix 2026-05-13: pass `phasm_r` (raster)
+     * not `phasm_s` (scan) as coeff_idx. The BC=2 canonical-key
+     * translation in `core_openh264_sys::encoder_pos_to_phasm_position_key`
+     * applies INV_ZZ_SCAN_4X4 to coeff_idx, treating it as raster — same
+     * convention HOOK-E (intra) uses. Passing scan here would generate
+     * a wrong canonical key on non-fixed-point scan indices (everything
+     * except {0,1,14,15}), silently misrouting overrides to the
+     * spatially-adjacent coefficient via the ZZ_SCAN ∘ INV_ZZ_SCAN
+     * symmetry. See `core/tests/openh264_cascade_gap_audit.rs` +
+     * `memory/h264_c813b_cascade_audit_findings.md` for the 32-seed
+     * audit that pinned this to HOOK-F. */
     for (uint8_t phasm_sb = 0; phasm_sb < 16; ++phasm_sb) {
       int16_t* phasm_pres   = pRes   + (int32_t)phasm_sb * 16;
       int16_t* phasm_pblock = pBlock + (int32_t)phasm_sb * 16;
@@ -616,7 +627,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
         uint8_t phasm_r = kPhasmLumaZigzag[phasm_s];
         phasm_apply_coeff_hooks_dual(&phasm_pos_f,
                                      /*sub_block=*/phasm_sb,
-                                     /*coeff_idx=*/phasm_s,
+                                     /*coeff_idx=*/phasm_r,
                                      PHASM_BLOCK_CAT_LUMA_4x4,
                                      /*level_a (raster)=*/&phasm_pres[phasm_r],
                                      /*level_b (zigzag)=*/&phasm_pblock[phasm_s]);
