@@ -221,6 +221,23 @@ void phasm_dual_recon_writeback(uint16_t mb_x,
                                 const uint8_t* stego_pixels,
                                 int32_t  src_stride);
 
+/* ---------------------------------------------------------------------
+ * Chroma per-MB clean snapshot stash (Phase C.8.5+)
+ *
+ * WelsEncRecUV captures the clean post-quant + post-dequant + post-DC-
+ * reinject chroma residual (64 int16_t per plane × 2 planes) into a
+ * process-global static. The IDCT-site caller in svc_encode_slice.cpp
+ * reads it via `phasm_get_chroma_clean_pres()` to recompute a clean
+ * reconstruction alongside the live stego one. Stash content is
+ * EQUIVALENT to what the live pRes holds at the IDCT call site, but
+ * computed from pre-HOOK snapshot. The IDCT runs on it directly.
+ *
+ * Scope: per-MB. iUV ∈ {0=Cb, 1=Cr}. Single-threaded (iMultipleThread
+ * Idc=1, phasm-stego default; #339 tracks the multi-thread revisit).
+ * ------------------------------------------------------------------ */
+void           phasm_stash_chroma_clean_pres(int32_t iUV, const int16_t* clean_pres64);
+const int16_t* phasm_get_chroma_clean_pres(int32_t iUV);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

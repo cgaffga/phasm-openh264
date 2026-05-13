@@ -650,7 +650,25 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
   const int16_t* pMF = g_kiQuantMF[kiQp];
   const int16_t* pFF = g_kiQuantInterFF[ (!kiInterFlag) * 6 + kiQp];
 
+  /* phasm-stego C.8.5 dual-recon snapshots. The clean post-quant chroma
+   * DC + AC are captured here so the IDCT-site caller in
+   * svc_encode_slice.cpp can recompute a clean reconstruction alongside
+   * the live stego one. Gated on a stego session being registered so
+   * non-stego encodes stay byte-identical to upstream. */
+  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL);
+  int16_t phasm_dr_clean_aDct2x2[4]   = {0, 0, 0, 0};
+  int16_t phasm_dr_clean_acres[64];
+
   uiNoneZeroCountMbDc = pfQuantizationHadamard2x2 (pRes, pFF[0] << 1, pMF[0]>>1, aDct2x2, iChromaDc);
+
+  /* phasm-stego C.8.5: snapshot post-Hadamard-quant clean DC before
+   * HOOK-C may mutate aDct2x2 + iChromaDc. */
+  if (phasm_dr_active) {
+    phasm_dr_clean_aDct2x2[0] = aDct2x2[0];
+    phasm_dr_clean_aDct2x2[1] = aDct2x2[1];
+    phasm_dr_clean_aDct2x2[2] = aDct2x2[2];
+    phasm_dr_clean_aDct2x2[3] = aDct2x2[3];
+  }
 
   /* phasm-stego HOOK-C: chroma DC post-Hadamard-quant, dual-array writeback.
    * Per the audit (openh264-hook-sites-intra.md §"Chroma DC hook"), this
@@ -707,6 +725,16 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
   }
 
   pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax);
+
+  /* phasm-stego C.8.5: snapshot post-quant clean AC strip (64 entries
+   * spanning the 4 sub-blocks of this plane) before HOOK-G may mutate.
+   * Raster slots 0/16/32/48 carry pre-DC-reinject scratch that gets
+   * overwritten by the DC-reinject step below; we re-inject from the
+   * separate DC snapshot for the clean recompute, so capturing
+   * pre-DC-reinject is the right moment. */
+  if (phasm_dr_active) {
+    memcpy(phasm_dr_clean_acres, pRes, sizeof(int16_t) * 64);
+  }
 
   for (j = 0; j < 4; j++) {
     if (aMax[j] == 0)
@@ -810,6 +838,43 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
     pRes[32] = aDct2x2[2];
     pRes[48] = aDct2x2[3];
   }
+
+  /* ----------------------------------------------------------------- *
+   * phasm-stego C.8.5: build CLEAN pre-IDCT pRes from snapshot for the
+   * caller's dual-recon at the chroma IDCT site. Mirrors the live-stego
+   * dequant + DC re-injection path on phasm_dr_clean_acres +
+   * phasm_dr_clean_aDct2x2 (the snapshots captured pre-HOOK-C/G). The
+   * IDCT-site caller pulls this clean buffer via
+   * phasm_get_chroma_clean_pres() and runs pfIDctFourT4 on it.
+   *
+   * Note: pfDequantizationFour4x4 dequantizes FOUR 4x4 blocks (64
+   * int16_t entries) per call. Chroma plane = 4 sub-blocks × 16 = 64
+   * entries, so one call covers it.
+   * ----------------------------------------------------------------- */
+  if (phasm_dr_active) {
+    if (iSingleCtr8x8 < 7) {
+      /* Live path zeros pRes via pfSetMemZeroSize64 when JVT-O079
+       * suppression fires. Mirror that on the clean snapshot. */
+      memset(phasm_dr_clean_acres, 0, sizeof(phasm_dr_clean_acres));
+    } else {
+      pfDequantizationFour4x4 (phasm_dr_clean_acres, g_kuiDequantCoeff[pCurMb->uiChromaQp]);
+    }
+
+    if (uiNoneZeroCountMbDc > 0) {
+      int16_t phasm_dr_clean_dc_work[4];
+      phasm_dr_clean_dc_work[0] = phasm_dr_clean_aDct2x2[0];
+      phasm_dr_clean_dc_work[1] = phasm_dr_clean_aDct2x2[1];
+      phasm_dr_clean_dc_work[2] = phasm_dr_clean_aDct2x2[2];
+      phasm_dr_clean_dc_work[3] = phasm_dr_clean_aDct2x2[3];
+      WelsDequantIHadamard2x2Dc (phasm_dr_clean_dc_work, g_kuiDequantCoeff[kiQp][0]);
+      phasm_dr_clean_acres[0]  = phasm_dr_clean_dc_work[0];
+      phasm_dr_clean_acres[16] = phasm_dr_clean_dc_work[1];
+      phasm_dr_clean_acres[32] = phasm_dr_clean_dc_work[2];
+      phasm_dr_clean_acres[48] = phasm_dr_clean_dc_work[3];
+    }
+
+    phasm_stash_chroma_clean_pres((int32_t)(iUV - 1), phasm_dr_clean_acres);
+  }
 }
 
 
@@ -821,6 +886,41 @@ void    WelsRecPskip (SDqLayer* pCurLayer, SWelsFuncPtrList* pFuncList, SMB* pCu
   pFuncList->pfCopy8x8Aligned (pCsMb[1],    *iRecStride++,  pMbCache->pSkipMb + 256, 8);
   pFuncList->pfCopy8x8Aligned (pCsMb[2],    *iRecStride,    pMbCache->pSkipMb + 320, 8);
   pFuncList->pfSetMemZeroSize8 (pCurMb->pNonZeroCount,  24);
+
+  /* phasm-stego C.8.5 dual-recon for Pskip (Site C-7). Pskip has no
+   * residual emitted -- clean == stego on all three planes. Just mirror
+   * the same Skip prediction (which the existing pfCopy*Aligned calls
+   * already wrote into pCsMb[0..2] = pDecPic) into pVisualRecPic at
+   * the same MB offset. */
+  if (PhasmStegoGetEncPreEmit() != NULL && pCurLayer->pVisualRecPic != NULL) {
+    int32_t* pStrideAll = pCurLayer->iCsStride;
+    const ptrdiff_t y_off  = pCsMb[0] - pCurLayer->pCsData[0];
+    const ptrdiff_t cb_off = pCsMb[1] - pCurLayer->pCsData[1];
+    const ptrdiff_t cr_off = pCsMb[2] - pCurLayer->pCsData[2];
+    phasm_dual_recon_writeback ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                                /*plane=*/0,
+                                (int32_t)(y_off % pStrideAll[0]),
+                                (int32_t)(y_off / pStrideAll[0]),
+                                /*w=*/16, /*h=*/16,
+                                /*clean_dst=*/NULL,
+                                pCurLayer->pVisualRecPic->pData[0], pStrideAll[0],
+                                /*clean_pixels=*/NULL,
+                                pMbCache->pSkipMb, /*src_stride=*/16);
+    phasm_dual_recon_writeback ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                                /*plane=*/1,
+                                (int32_t)(cb_off % pStrideAll[1]),
+                                (int32_t)(cb_off / pStrideAll[1]),
+                                8, 8, NULL,
+                                pCurLayer->pVisualRecPic->pData[1], pStrideAll[1],
+                                NULL, pMbCache->pSkipMb + 256, 8);
+    phasm_dual_recon_writeback ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                                /*plane=*/2,
+                                (int32_t)(cr_off % pStrideAll[2]),
+                                (int32_t)(cr_off / pStrideAll[2]),
+                                8, 8, NULL,
+                                pCurLayer->pVisualRecPic->pData[2], pStrideAll[2],
+                                NULL, pMbCache->pSkipMb + 320, 8);
+  }
 }
 
 bool WelsTryPYskip (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {

@@ -108,6 +108,27 @@ void* PhasmStegoGetUserData(void) {
   return g_phasm_user_data;
 }
 
+}  // close extern "C" for namespace-private static
+
+namespace {
+// Per-MB chroma clean snapshot stash (Phase C.8.5). 64 int16_t per
+// plane × 2 planes = 256 bytes total. Single-threaded encoder default
+// (iMultipleThreadIdc=1), so a single process-global is safe.
+int16_t g_phasm_chroma_clean_pres[2][64] = {{0}, {0}};
+}  // namespace
+
+extern "C" {
+
+void phasm_stash_chroma_clean_pres(int32_t iUV, const int16_t* clean_pres64) {
+  if (iUV < 0 || iUV > 1 || clean_pres64 == nullptr) return;
+  std::memcpy(g_phasm_chroma_clean_pres[iUV], clean_pres64, sizeof(int16_t) * 64);
+}
+
+const int16_t* phasm_get_chroma_clean_pres(int32_t iUV) {
+  if (iUV < 0 || iUV > 1) return nullptr;
+  return g_phasm_chroma_clean_pres[iUV];
+}
+
 // ---------------------------------------------------------------------
 // phasm_dual_recon_writeback — internal helper (Phase C.8.2+)
 //
