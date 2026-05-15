@@ -83,12 +83,20 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
    * is active the snapshots+recompute are skipped entirely.
    *
    * `phasm_dr_active` is captured here ONCE so the rest of the function
-   * doesn't pay the global accessor cost on every line. */
+   * doesn't pay the global accessor cost on every line.
+   *
+   * Phase C.9.1 (#449) Path A — per-MB skip-on-clean. `phasm_dr_dirty`
+   * is OR-accumulated from every coeff-hook return; if it stays false
+   * after all hooks have fired this MB had zero coefficient flips and
+   * the encoder's recon path already produced the clean reconstruction
+   * (stego == clean for this MB). We then skip the dequant+IDCT
+   * recompute entirely and just mirror pPred into pVisualRecPic. */
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_aDctT4Dc, 16, 16)
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes,    256, 16)
   ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_recon,   256, 16)
   const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
                                && (pEncCtx->pCurDqLayer->pVisualRecPic != NULL);
+  bool phasm_dr_dirty = false;
 
   SWelsFuncPtrList* pFuncList   = pEncCtx->pFuncList;
   SDqLayer* pCurDqLayer         = pEncCtx->pCurDqLayer;
@@ -140,11 +148,11 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
     phasm_pos.mv_component  = 0xff;
     phasm_pos._reserved     = 0;
     for (uint8_t phasm_k = 0; phasm_k < 16; ++phasm_k) {
-      phasm_apply_coeff_hooks (&phasm_pos,
+      phasm_dr_dirty |= (phasm_apply_coeff_hooks (&phasm_pos,
                                /*sub_block=*/phasm_k,
                                /*coeff_idx=*/0,
                                PHASM_BLOCK_CAT_LUMA_DC,
-                               &aDctT4Dc[phasm_k]);
+                               &aDctT4Dc[phasm_k]) != 0);
     }
   }
 
@@ -186,11 +194,11 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
       phasm_pos_b._reserved     = 0;
       for (uint8_t phasm_sb = 0; phasm_sb < 4; ++phasm_sb) {
         for (uint8_t phasm_c = 1; phasm_c < 16; ++phasm_c) {  /* skip DC slot */
-          phasm_apply_coeff_hooks (&phasm_pos_b,
+          phasm_dr_dirty |= (phasm_apply_coeff_hooks (&phasm_pos_b,
                                    /*sub_block=*/(uint8_t)(i * 4 + phasm_sb),
                                    /*coeff_idx=*/phasm_c,
                                    PHASM_BLOCK_CAT_LUMA_AC,
-                                   &pRes[phasm_sb * 16 + phasm_c]);
+                                   &pRes[phasm_sb * 16 + phasm_c]) != 0);
         }
       }
     }
@@ -272,10 +280,12 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
    * Cost: ~one extra dequant pass + four pfIDctFourT4 (CBP>0 case) or
    * one pfIDctI16x16Dc (DC-only). CBP=0 case is a no-op for the
    * clean recompute (pPred already holds pBestPred); just the
-   * stego-mirror copy. v1.1+ optimization (#449): delta-IDCT instead
-   * of full recompute.
+   * stego-mirror copy. C.9.1 Path A (#449): skip the recompute when
+   * no hook returned a flip in this MB (phasm_dr_dirty==false), since
+   * pPred already holds the clean recon — just mirror it to
+   * pVisualRecPic.
    * ----------------------------------------------------------------- */
-  if (phasm_dr_active) {
+  if (phasm_dr_active && phasm_dr_dirty) {
     /* (1) Snapshot the current stego recon block at pPred (16x16, with
      *     the layer's encode stride between rows) into a contiguous
      *     stride-16 scratch. This is the picture pVisualRecPic will
@@ -374,6 +384,28 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
           /*stego_pixels=*/phasm_dr_stego_recon,
           /*src_stride=*/16);
     }
+  } else if (phasm_dr_active) {
+    /* C.9.1 Path A skip-clean: zero coeff flips in this MB. pPred already
+     * holds the clean reconstruction (= stego reconstruction; identical).
+     * Snapshot pPred and mirror it to pVisualRecPic. clean_pixels and
+     * stego_pixels point at the same buffer so the observe callback sees
+     * a zero delta for this MB. */
+    uint8_t phasm_dr_recon[256];
+    for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
+      memcpy(phasm_dr_recon + phasm_y * 16,
+             pPred + (size_t)phasm_y * (size_t)kiRecStride, 16);
+    }
+    const int32_t phasm_dr_px = pCurMb->iMbX * 16;
+    const int32_t phasm_dr_py = pCurMb->iMbY * 16;
+    phasm_dual_recon_writeback (
+        (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/0,
+        phasm_dr_px, phasm_dr_py, /*block_w=*/16, /*block_h=*/16,
+        /*clean_dst=*/NULL,
+        /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
+        /*dst_stride=*/kiRecStride,
+        /*clean_pixels=*/phasm_dr_recon,
+        /*stego_pixels=*/phasm_dr_recon,
+        /*src_stride=*/16);
   }
 }
 void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uint8_t uiI4x4Idx) {
@@ -403,11 +435,19 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
 
   /* phasm-stego C.8.4 dual-recon: per-sub-block snapshot + scratch. The
    * scope here is ONE 4x4 sub-block; the caller (WelsMdI4x4 / Fast) runs
-   * this function once per iI4x4Idx ∈ 0..15 inside its own loop. */
+   * this function once per iI4x4Idx ∈ 0..15 inside its own loop.
+   *
+   * Phase C.9.1 (#449) Path A — per-sub-block skip-on-clean. The dirty
+   * accumulator is local to this 4x4; subsequent sub-blocks in the same
+   * MB make their own decision. Clean sub-blocks leave pPredI4x4
+   * untouched (encoder already wrote the clean recon), so the cascade
+   * read by the NEXT sub-block's intra-pred is correct without any
+   * extra work. */
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes4x4, 16, 16)
   ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_i4x4,    16, 4)
   const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
                                && (pCurDqLayer->pVisualRecPic != NULL);
+  bool phasm_dr_dirty = false;
 
   pFuncList->pfDctT4 (pResI4x4, & (pEncMb[pStrideEncBlockOffset[uiI4x4Idx]]), iEncStride, pBestPred, 4);
   pFuncList->pfQuantization4x4 (pResI4x4, pFF, pMF);
@@ -442,11 +482,11 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
     phasm_pos_e.mv_component  = 0xff;
     phasm_pos_e._reserved     = 0;
     for (uint8_t phasm_c = 0; phasm_c < 16; ++phasm_c) {
-      phasm_apply_coeff_hooks (&phasm_pos_e,
+      phasm_dr_dirty |= (phasm_apply_coeff_hooks (&phasm_pos_e,
                                /*sub_block=*/uiI4x4Idx,
                                /*coeff_idx=*/phasm_c,
                                PHASM_BLOCK_CAT_LUMA_4x4,
-                               &pResI4x4[phasm_c]);
+                               &pResI4x4[phasm_c]) != 0);
     }
   }
 
@@ -474,9 +514,10 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
    * caller (WelsMdI4x4 / Fast).
    *
    * Cost: one extra pfDequantization4x4 + pfIDctT4 per sub-block when
-   * nNz > 0; pure memcpy when nNz == 0.
+   * nNz > 0; pure memcpy when nNz == 0. C.9.1 Path A: skip recompute
+   * when this sub-block had zero flips.
    * ----------------------------------------------------------------- */
-  if (phasm_dr_active) {
+  if (phasm_dr_active && phasm_dr_dirty) {
     /* (1) Snapshot stego sub-block (4 rows × 4 bytes, picture stride). */
     for (int32_t phasm_y = 0; phasm_y < 4; ++phasm_y) {
       memcpy(phasm_dr_stego_i4x4 + phasm_y * 4,
@@ -522,6 +563,26 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
           /*stego_pixels=*/phasm_dr_stego_i4x4,
           /*src_stride=*/4);
     }
+  } else if (phasm_dr_active) {
+    /* C.9.1 Path A skip-clean: zero flips in this sub-block. pPredI4x4
+     * already holds the clean recon; mirror to pVisualRecPic. */
+    uint8_t phasm_dr_recon4x4[16];
+    for (int32_t phasm_y = 0; phasm_y < 4; ++phasm_y) {
+      memcpy(phasm_dr_recon4x4 + phasm_y * 4,
+             pPredI4x4 + (size_t)phasm_y * (size_t)iRecStride, 4);
+    }
+    const ptrdiff_t phasm_dr_plane_off = pPredI4x4 - pCurDqLayer->pCsData[0];
+    const int32_t phasm_dr_py = (int32_t)(phasm_dr_plane_off / iRecStride);
+    const int32_t phasm_dr_px = (int32_t)(phasm_dr_plane_off % iRecStride);
+    phasm_dual_recon_writeback (
+        (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY, /*plane=*/0,
+        phasm_dr_px, phasm_dr_py, /*block_w=*/4, /*block_h=*/4,
+        /*clean_dst=*/NULL,
+        /*stego_dst=*/pCurDqLayer->pVisualRecPic->pData[0],
+        /*dst_stride=*/iRecStride,
+        /*clean_pixels=*/phasm_dr_recon4x4,
+        /*stego_pixels=*/phasm_dr_recon4x4,
+        /*src_stride=*/4);
   }
 }
 
