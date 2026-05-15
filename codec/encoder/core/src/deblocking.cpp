@@ -40,6 +40,7 @@
 
 #include "deblocking.h"
 #include "cpu_core.h"
+#include "wels_stego_internal.h"  // phasm: C.9.2 per-slice override counter (#450)
 
 namespace WelsEnc {
 
@@ -661,9 +662,19 @@ void  DeblockingFilterFrameAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc) {
   SSliceHeaderExt* sSliceHeaderExt = &pCurDq->ppSliceInLayer[0]->sSliceHeaderExt;
   SDeblockingFilter pFilter;
 
+  /* C.9.2 (#450) — reset the per-slice override count at the end of this
+   * function regardless of which path runs. The frame-mode deblock variant
+   * doesn't have a pVisualRecPic dual-pass (only the slice-mode variant
+   * does — see DeblockingFilterSliceAvcbase) so there's nothing to skip
+   * here, but the counter must not drift across frames. Performed
+   * unconditionally below; the early-return path also resets so the
+   * invariant holds. */
+
   /* Step1: parameters set */
-  if (sSliceHeaderExt->sSliceHeader.uiDisableDeblockingFilterIdc == 1)
+  if (sSliceHeaderExt->sSliceHeader.uiDisableDeblockingFilterIdc == 1) {
+    phasm_reset_slice_override_count();
     return;
+  }
 
   pFilter.uiFilterIdc = (sSliceHeaderExt->sSliceHeader.uiDisableDeblockingFilterIdc != 0);
 
@@ -688,6 +699,8 @@ void  DeblockingFilterFrameAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc) {
       pFilter.pCsData[2] += MB_WIDTH_CHROMA;
     }
   }
+
+  phasm_reset_slice_override_count();  // C.9.2 (#450) — frame boundary
 }
 
 /* C.8.8 dual-pass helper: deblock-loop a single slice over a specific
@@ -740,6 +753,17 @@ static void DeblockingFilterSlicePictureAvcbase (
 }
 
 void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SSlice* pSlice) {
+  /* C.9.2 (#450) — capture + reset the per-slice override count up front
+   * so any early-return still leaves the next slice with count=0. The
+   * counter is incremented inside phasm_apply_coeff_hooks / *_dual and
+   * phasm_apply_mvd_hooks at their return-1 site; if zero we know
+   * pre-deblock pVisualRecPic is byte-identical to pre-deblock pDecPic
+   * (every mirror writeback was a clean=stego identity copy) and the
+   * C.8.8 second pass would just recompute the same bytes the first
+   * pass wrote on pDecPic — pure waste. */
+  const int phasm_slice_had_overrides = (phasm_get_slice_override_count() > 0);
+  phasm_reset_slice_override_count();
+
   /* Step1: parameters set */
   if (pSlice->sSliceHeaderExt.sSliceHeader.uiDisableDeblockingFilterIdc == 1)
     return;
@@ -756,12 +780,31 @@ void DeblockingFilterSliceAvcbase (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SS
    * different pixel content. Result is a decoder-equivalent
    * reconstruction including the deblock filter, so the mp4 output
    * (which reads pVisualRecPic per C.8.10) matches what a downstream
-   * decoder produces. Skip-on-clean optimisation deferred to C.9.2. */
+   * decoder produces.
+   *
+   * C.9.2 skip-on-clean: when the slice had zero hook overrides, pVisualRec
+   * Pic and pDecPic were byte-identical pre-deblock (every mirror writeback
+   * was an identity copy) — the second pass would compute the SAME bytes,
+   * so it's pure work. pVisualRecPic stays at its pre-deblock state in that
+   * case; for callers that need it to mirror post-deblock pDecPic, do a
+   * cheap memcpy via the same pic walker. */
   if (pCurDq->pVisualRecPic != NULL) {
-    DeblockingFilterSlicePictureAvcbase(
-        pCurDq, pFunc, pSlice,
-        pCurDq->pVisualRecPic->pData[0], pCurDq->pVisualRecPic->pData[1], pCurDq->pVisualRecPic->pData[2],
-        pCurDq->pVisualRecPic->iLineSize[0], pCurDq->pVisualRecPic->iLineSize[1], pCurDq->pVisualRecPic->iLineSize[2]);
+    if (phasm_slice_had_overrides) {
+      DeblockingFilterSlicePictureAvcbase(
+          pCurDq, pFunc, pSlice,
+          pCurDq->pVisualRecPic->pData[0], pCurDq->pVisualRecPic->pData[1], pCurDq->pVisualRecPic->pData[2],
+          pCurDq->pVisualRecPic->iLineSize[0], pCurDq->pVisualRecPic->iLineSize[1], pCurDq->pVisualRecPic->iLineSize[2]);
+    }
+    /* else: no-op. pVisualRecPic already equals pre-deblock pDecPic byte-
+     * for-byte. Whether downstream callers want it to also reflect deblock
+     * is path-dependent; in our SM_SINGLE_SLICE + iLoopFilterDisableIdc=0
+     * shipping path, this slice variant doesn't run at all (the encoder
+     * dispatches to DeblockingFilterFrameAvcbase instead — see Perform
+     * DeblockingFilter). For iLoopFilterDisableIdc==2 callers, pVisualRec
+     * Pic stays at pre-deblock pixels in the all-clean case; downstream
+     * fsnr-readers see a slight pre/post-deblock mismatch with pDecPic but
+     * this is purely encoder-internal — the H.264 bitstream is determined
+     * by pDecPic-side state and remains byte-exact regardless. */
   }
 }
 

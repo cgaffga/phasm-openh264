@@ -371,6 +371,19 @@ uint64_t phasm_get_hook_single_fires_total(void);
 uint64_t phasm_get_hook_single_bail_level_zero(void);
 uint64_t phasm_get_hook_single_applied(void);
 
+/* ---------------------------------------------------------------------
+ * Phase C.9.0 (#482) — Pass-1 visual_recon disable. Set BEFORE encoder
+ * InitializeExt; default 1 (the C.8 baseline). When 0, InitDqLayers
+ * skips the pVisualRef[] mirror-pool allocation, leaving pVisualDecPic /
+ * pVisualRecPic NULL for this encoder instance. Every per-MB mirror site
+ * and the C.8.8 dual deblock pass already gate on `pVisualRecPic !=
+ * NULL`, so disabling here cleanly bypasses ALL visual_recon work.
+ * Intended for cover-probe passes whose bitstream is walked then
+ * discarded (no mp4 mux, no fsnr observation).
+ * ------------------------------------------------------------------ */
+void phasm_set_dual_recon_enabled(int enabled);
+int  phasm_get_dual_recon_enabled(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

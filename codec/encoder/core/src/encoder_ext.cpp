@@ -1070,15 +1070,25 @@ static inline int32_t InitDqLayers (sWelsEncCtx** ppCtx, SExistingParasetList* p
     // phasm: parallel stego-mirror pool. bNeedMbInfo=false, iNeedFeatureStorage=0
     // -- mirror only owns Y/U/V planes; per-MB metadata + screen-content feature
     // storage stay single-source on pRef[].
-    i = 0;
-    do {
-      pRefList->pVisualRef[i] = AllocPicture (pMa, kiWidth, kiHeight, false, 0);
-      WELS_VERIFY_RETURN_PROC_IF (1, (NULL == pRefList->pVisualRef[i]), FreeRefList (pRefList, pMa, iNumRef))
-      ++ i;
-    } while (i < 1 + iNumRef);
+    //
+    // C.9.0 (#482): skip the entire mirror-pool allocation when the caller
+    // disabled dual_recon BEFORE this Init runs (Pass-1 cover probe path).
+    // pVisualRef[] stays all-NULL (zero-init by WelsMallocz on pRefList
+    // above), pVisualNextBuffer stays NULL, downstream pVisualDecPic +
+    // pVisualRecPic stay NULL, and every hook+deblock site short-circuits
+    // via the existing NULL guards. FreeRefList already null-checks each
+    // pVisualRef[i] before freeing so teardown is symmetric.
+    if (phasm_get_dual_recon_enabled()) {
+      i = 0;
+      do {
+        pRefList->pVisualRef[i] = AllocPicture (pMa, kiWidth, kiHeight, false, 0);
+        WELS_VERIFY_RETURN_PROC_IF (1, (NULL == pRefList->pVisualRef[i]), FreeRefList (pRefList, pMa, iNumRef))
+        ++ i;
+      } while (i < 1 + iNumRef);
+      pRefList->pVisualNextBuffer = pRefList->pVisualRef[0]; // phasm
+    }
 
     pRefList->pNextBuffer = pRefList->pRef[0];
-    pRefList->pVisualNextBuffer = pRefList->pVisualRef[0]; // phasm
     (*ppCtx)->ppRefPicListExt[iDlayerIndex] = pRefList;
     ++ iDlayerIndex;
   }

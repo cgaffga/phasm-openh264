@@ -148,6 +148,32 @@ int     g_phasm_mv_override_active = 0;
 // skips the entire snapshot/restore/IDCT-recompute cycle.
 int     g_phasm_p_luma_dirty = 0;
 int     g_phasm_chroma_dirty[2] = {0, 0};
+
+// Phase C.9.0 (#482) — Pass-1 visual_recon disable. Default 1 (enabled =
+// the C.8 baseline). When 0, the InitDqLayers allocator in encoder_ext.cpp
+// skips the pVisualRef[] pool, leaving pVisualDecPic/pVisualRecPic NULL
+// for the lifetime of this encoder instance. Every per-MB mirror site
+// and the C.8.8 dual deblock pass already gate on `pVisualRecPic !=
+// NULL`, so disabling here cleanly bypasses ALL visual_recon work without
+// any per-site branching. Used by the openh264_stego orchestrator's
+// Pass-1 cover probe (whose bitstream is walked then discarded — no mp4
+// output, no fsnr observation).
+//
+// Set BEFORE phasm_encoder_initialize; the shim's wrapper threads the
+// flag through and the global is read inside InitDqLayers. Single-
+// threaded encoder default (#339 tracks revisit).
+int     g_phasm_dual_recon_enabled = 1;
+
+// Phase C.9.2 (#450) — per-slice override counter for deblock skip-on-
+// clean. Incremented inside phasm_apply_coeff_hooks / *_dual and
+// phasm_apply_mvd_hooks at the return-1 site (where a value was actually
+// modified). Read at the start of DeblockingFilterSliceAvcbase; if 0 we
+// skip the C.8.8 second deblock pass over pVisualRecPic since the
+// pre-deblock pVisualRecPic equals pDecPic byte-for-byte (every mirror
+// write was a clean=stego identity copy). Reset at the end of every
+// deblock pass (slice + frame variants) so the counter starts at 0 for
+// the next slice. Single-threaded; see #339 for multi-thread plan.
+int     g_phasm_slice_override_count = 0;
 }  // namespace
 
 extern "C" {
@@ -198,6 +224,34 @@ void phasm_reset_dirty_flags(void) {
   g_phasm_p_luma_dirty = 0;
   g_phasm_chroma_dirty[0] = 0;
   g_phasm_chroma_dirty[1] = 0;
+}
+
+// Phase C.9.0 (#482) dual_recon_enabled setter / getter. Set by the shim
+// before phasm_encoder_initialize so InitDqLayers reads the flag when
+// deciding whether to allocate the pVisualRef[] mirror pool.
+void phasm_set_dual_recon_enabled(int enabled) {
+  g_phasm_dual_recon_enabled = (enabled != 0) ? 1 : 0;
+}
+
+int phasm_get_dual_recon_enabled(void) {
+  return g_phasm_dual_recon_enabled;
+}
+
+// Phase C.9.2 (#450) per-slice override counter. Incremented inside the
+// apply_*_hooks return-1 site. Reset at the end of every deblock pass
+// (slice + frame variants). Read at the START of DeblockingFilterSlice
+// Avcbase to decide whether the C.8.8 second deblock pass on pVisualRec
+// Pic can be skipped.
+void phasm_inc_slice_override_count(void) {
+  g_phasm_slice_override_count++;
+}
+
+int phasm_get_slice_override_count(void) {
+  return g_phasm_slice_override_count;
+}
+
+void phasm_reset_slice_override_count(void) {
+  g_phasm_slice_override_count = 0;
 }
 
 void phasm_set_mv_override_active(int active) {

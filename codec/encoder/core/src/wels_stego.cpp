@@ -170,6 +170,7 @@ int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                                       old_level);
   if (*level != old_level) {
     g_phasm_hook_single_applied.fetch_add(1, std::memory_order_relaxed);
+    phasm_inc_slice_override_count();  // C.9.2 (#450)
     return 1;
   }
   return 0;
@@ -207,6 +208,7 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
     *level_a = new_level;
     *level_b = new_level;
     g_phasm_hook_dual_applied.fetch_add(1, std::memory_order_relaxed);
+    phasm_inc_slice_override_count();  // C.9.2 (#450)
     return 1;
   }
   return 0;
@@ -366,6 +368,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
     *(ctx->mvList_y_qpel) = new_y;
   }
 
+  phasm_inc_slice_override_count();  // C.9.2 (#450)
   return 1;
 }
 

@@ -269,6 +269,37 @@ int            phasm_get_chroma_dirty(int32_t iUV);
 void           phasm_reset_dirty_flags(void);
 
 /* ---------------------------------------------------------------------
+ * Phase C.9.0 (#482) — Pass-1 visual_recon disable.
+ *
+ * Toggles whether InitDqLayers allocates the pVisualRef[] mirror pool.
+ * When disabled, pVisualDecPic / pVisualRecPic stay NULL for the
+ * encoder's lifetime and every per-MB mirror site plus the C.8.8 dual
+ * deblock pass short-circuits via the existing NULL guards. Used by the
+ * Pass-1 cover probe (whose bitstream is walked then discarded).
+ *
+ * MUST be called BEFORE phasm_encoder_initialize for the flag to take
+ * effect. Default 1 (enabled = current C.8 baseline behavior).
+ * ------------------------------------------------------------------ */
+void           phasm_set_dual_recon_enabled(int enabled);
+int            phasm_get_dual_recon_enabled(void);
+
+/* ---------------------------------------------------------------------
+ * Phase C.9.2 (#450) — per-slice override counter.
+ *
+ * Incremented by phasm_apply_coeff_hooks / *_dual / phasm_apply_mvd_hooks
+ * at their return-1 site (where a value was actually modified). Read at
+ * the start of DeblockingFilterSliceAvcbase to decide whether the C.8.8
+ * second deblock pass on pVisualRecPic can be skipped (when the count is
+ * 0 the pre-deblock pVisualRecPic is byte-identical to pre-deblock
+ * pDecPic, so the second deblock would produce the same result the first
+ * one already wrote). Reset at the end of every deblock pass (slice and
+ * frame variants) so the next slice starts at 0.
+ * ------------------------------------------------------------------ */
+void           phasm_inc_slice_override_count(void);
+int            phasm_get_slice_override_count(void);
+void           phasm_reset_slice_override_count(void);
+
+/* ---------------------------------------------------------------------
  * MvdSign cascade-break MC stash (Phase C.8.7)
  *
  * HOOK-H1 (svc_base_layer_md.cpp) and partition MVD sites mutate the
