@@ -610,6 +610,53 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
     pfIdctFour4x4 (pDecV, kiDecStrideChroma, pDecV, kiDecStrideChroma, pScaledTcoeff + 320);
 
     if (phasm_dr_active) {
+      /* C.9.1 Path A v2 (#449): if no plane is dirty and no MV override
+       * fired in this MB, pDecY/U/V already holds the clean recon
+       * (== stego, since no flips happened anywhere). Skip the entire
+       * snapshot/restore/re-IDCT/mirror dance — just memcpy pDec →
+       * pVisualRecPic for each plane. */
+      const int phasm_dr_p_luma_dirty       = phasm_get_p_luma_dirty();
+      const int phasm_dr_chroma_cb_dirty    = phasm_get_chroma_dirty(0);
+      const int phasm_dr_chroma_cr_dirty    = phasm_get_chroma_dirty(1);
+      const int phasm_dr_mv_active_at_entry = phasm_get_mv_override_active();
+      if (!phasm_dr_p_luma_dirty
+          && !phasm_dr_chroma_cb_dirty
+          && !phasm_dr_chroma_cr_dirty
+          && !phasm_dr_mv_active_at_entry) {
+        uint8_t phasm_dr_recon_y[256], phasm_dr_recon_u[64], phasm_dr_recon_v[64];
+        for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
+          memcpy(phasm_dr_recon_y + phasm_y * 16,
+                 pDecY + (size_t)phasm_y * (size_t)kiDecStrideLuma, 16);
+        }
+        for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
+          memcpy(phasm_dr_recon_u + phasm_y * 8,
+                 pDecU + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+          memcpy(phasm_dr_recon_v + phasm_y * 8,
+                 pDecV + (size_t)phasm_y * (size_t)kiDecStrideChroma, 8);
+        }
+        const ptrdiff_t plane_off_y = pDecY - pDq->pDecPic->pData[0];
+        const ptrdiff_t plane_off_u = pDecU - pDq->pDecPic->pData[1];
+        const ptrdiff_t plane_off_v = pDecV - pDq->pDecPic->pData[2];
+        phasm_dual_recon_writeback (
+            (uint16_t)pMb->iMbX, (uint16_t)pMb->iMbY, /*plane=*/0,
+            (int32_t)(plane_off_y % kiDecStrideLuma),
+            (int32_t)(plane_off_y / kiDecStrideLuma),
+            16, 16, NULL, pDq->pVisualRecPic->pData[0], kiDecStrideLuma,
+            phasm_dr_recon_y, phasm_dr_recon_y, 16);
+        phasm_dual_recon_writeback (
+            (uint16_t)pMb->iMbX, (uint16_t)pMb->iMbY, /*plane=*/1,
+            (int32_t)(plane_off_u % kiDecStrideChroma),
+            (int32_t)(plane_off_u / kiDecStrideChroma),
+            8, 8, NULL, pDq->pVisualRecPic->pData[1], kiDecStrideChroma,
+            phasm_dr_recon_u, phasm_dr_recon_u, 8);
+        phasm_dual_recon_writeback (
+            (uint16_t)pMb->iMbX, (uint16_t)pMb->iMbY, /*plane=*/2,
+            (int32_t)(plane_off_v % kiDecStrideChroma),
+            (int32_t)(plane_off_v / kiDecStrideChroma),
+            8, 8, NULL, pDq->pVisualRecPic->pData[2], kiDecStrideChroma,
+            phasm_dr_recon_v, phasm_dr_recon_v, 8);
+        phasm_reset_dirty_flags();
+      } else {
       uint8_t phasm_dr_stego_y[256], phasm_dr_stego_u[64], phasm_dr_stego_v[64];
       for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
         memcpy(phasm_dr_stego_y + phasm_y * 16,
@@ -725,6 +772,8 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
           (int32_t)(plane_off_v / kiDecStrideChroma),
           8, 8, NULL, pDq->pVisualRecPic->pData[2], kiDecStrideChroma,
           phasm_dr_clean_v, phasm_dr_stego_v, 8);
+      phasm_reset_dirty_flags();
+      }  // close C.9.1 Path A v2 dirty-branch else
     }
   }
 }

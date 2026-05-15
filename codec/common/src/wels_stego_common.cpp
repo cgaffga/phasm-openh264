@@ -136,6 +136,18 @@ int16_t g_phasm_p_luma_clean_pres[256] = {0};
 uint8_t g_phasm_mv_clean_mc_luma[256] = {0};
 uint8_t g_phasm_mv_clean_mc_chroma[2][64] = {{0}, {0}};
 int     g_phasm_mv_override_active = 0;
+
+// Phase C.9.1 Path A v2 (#449) per-MB dirty flags for the P-frame inter
+// + chroma stashes. Each setter is called at the snapshot+hook site (in
+// svc_encode_mb.cpp) with the OR-accumulated return of every coeff hook
+// fired on that plane; the consume site (in svc_encode_slice.cpp) gates
+// the dual-recon dance on (luma_dirty || chroma[0] || chroma[1] ||
+// mv_override_active). When all four are zero the encoder's pDecPic
+// already holds the clean recon (no hook flipped anything), so the
+// consume site just memcpys pDec → pVisualRecPic at the MB offset and
+// skips the entire snapshot/restore/IDCT-recompute cycle.
+int     g_phasm_p_luma_dirty = 0;
+int     g_phasm_chroma_dirty[2] = {0, 0};
 }  // namespace
 
 extern "C" {
@@ -157,6 +169,35 @@ void phasm_stash_p_luma_clean_pres(const int16_t* clean_pres256) {
 
 const int16_t* phasm_get_p_luma_clean_pres(void) {
   return g_phasm_p_luma_clean_pres;
+}
+
+// Phase C.9.1 Path A v2 dirty-flag accessors. The setter is called once
+// per MB at the snapshot site after every coeff hook for the plane has
+// fired (OR-accumulated). The consume site reads them and clears with
+// phasm_reset_dirty_flags() after consuming, so a stale set from the
+// previous MB doesn't leak forward.
+void phasm_set_p_luma_dirty(int dirty) {
+  g_phasm_p_luma_dirty = (dirty != 0) ? 1 : 0;
+}
+
+int phasm_get_p_luma_dirty(void) {
+  return g_phasm_p_luma_dirty;
+}
+
+void phasm_set_chroma_dirty(int32_t iUV, int dirty) {
+  if (iUV < 0 || iUV > 1) return;
+  g_phasm_chroma_dirty[iUV] = (dirty != 0) ? 1 : 0;
+}
+
+int phasm_get_chroma_dirty(int32_t iUV) {
+  if (iUV < 0 || iUV > 1) return 0;
+  return g_phasm_chroma_dirty[iUV];
+}
+
+void phasm_reset_dirty_flags(void) {
+  g_phasm_p_luma_dirty = 0;
+  g_phasm_chroma_dirty[0] = 0;
+  g_phasm_chroma_dirty[1] = 0;
 }
 
 void phasm_set_mv_override_active(int active) {

@@ -670,6 +670,10 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
     phasm_pos_f.ref_idx       = 0xff;
     phasm_pos_f.mv_component  = 0xff;
     phasm_pos_f._reserved     = 0;
+    /* C.9.1 Path A v2 (#449): OR-accumulate the dual-hook return so the
+     * consume site can skip the entire dual-recon dance when no flip
+     * fired anywhere in this MB's luma coeffs. */
+    bool phasm_dr_p_luma_dirty = false;
     /* phasm-stego C.8.13(b) fix 2026-05-13: pass `phasm_r` (raster)
      * not `phasm_s` (scan) as coeff_idx. The BC=2 canonical-key
      * translation in `core_openh264_sys::encoder_pos_to_phasm_position_key`
@@ -686,14 +690,15 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
       int16_t* phasm_pblock = pBlock + (int32_t)phasm_sb * 16;
       for (uint8_t phasm_s = 0; phasm_s < 16; ++phasm_s) {
         uint8_t phasm_r = kPhasmLumaZigzag[phasm_s];
-        phasm_apply_coeff_hooks_dual(&phasm_pos_f,
+        phasm_dr_p_luma_dirty |= (phasm_apply_coeff_hooks_dual(&phasm_pos_f,
                                      /*sub_block=*/phasm_sb,
                                      /*coeff_idx=*/phasm_r,
                                      PHASM_BLOCK_CAT_LUMA_4x4,
                                      /*level_a (raster)=*/&phasm_pres[phasm_r],
-                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]);
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]) != 0);
       }
     }
+    phasm_set_p_luma_dirty(phasm_dr_p_luma_dirty ? 1 : 0);
   }
 
   memset (pCurMb->pNonZeroCount, 0, 16);
@@ -772,6 +777,11 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
   const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL);
   int16_t phasm_dr_clean_aDct2x2[4]   = {0, 0, 0, 0};
   int16_t phasm_dr_clean_acres[64];
+  /* C.9.1 Path A v2 (#449) per-plane chroma dirty accumulator. OR'd from
+   * HOOK-C (DC) and HOOK-G (AC); committed at end of function so the
+   * consume site can skip the chroma recompute when both hook families
+   * left coefficients untouched. */
+  bool phasm_dr_chroma_dirty = false;
 
   uiNoneZeroCountMbDc = pfQuantizationHadamard2x2 (pRes, pFF[0] << 1, pMF[0]>>1, aDct2x2, iChromaDc);
 
@@ -829,12 +839,12 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
     phasm_pos_c.mv_component  = 0xff;
     phasm_pos_c._reserved     = 0;
     for (uint8_t phasm_c = 0; phasm_c < 4; ++phasm_c) {
-      phasm_apply_coeff_hooks_dual(&phasm_pos_c,
+      phasm_dr_chroma_dirty |= (phasm_apply_coeff_hooks_dual(&phasm_pos_c,
                                    /*sub_block=*/0,
                                    /*coeff_idx=*/phasm_c,
                                    PHASM_BLOCK_CAT_CHROMA_DC,
                                    /*level_a (aDct2x2/stack)=*/&aDct2x2[phasm_c],
-                                   /*level_b (iChromaDc/heap)=*/&iChromaDc[phasm_c]);
+                                   /*level_b (iChromaDc/heap)=*/&iChromaDc[phasm_c]) != 0);
     }
   }
 
@@ -916,12 +926,12 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
       int16_t* phasm_pblock = phasm_pblock_base + (int32_t)phasm_sb * 16;
       for (uint8_t phasm_s = 0; phasm_s < 15; ++phasm_s) {
         uint8_t phasm_r = kPhasmChromaAcZigzag[phasm_s];
-        phasm_apply_coeff_hooks_dual(&phasm_pos_g,
+        phasm_dr_chroma_dirty |= (phasm_apply_coeff_hooks_dual(&phasm_pos_g,
                                      /*sub_block=*/phasm_sb,
                                      /*coeff_idx=*/phasm_s,
                                      PHASM_BLOCK_CAT_CHROMA_AC,
                                      /*level_a (raster)=*/&phasm_pres[phasm_r],
-                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]);
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]) != 0);
       }
     }
   }
@@ -988,6 +998,8 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
     }
 
     phasm_stash_chroma_clean_pres((int32_t)(iUV - 1), phasm_dr_clean_acres);
+    /* C.9.1 Path A v2: commit per-plane dirty flag for the consume site. */
+    phasm_set_chroma_dirty((int32_t)(iUV - 1), phasm_dr_chroma_dirty ? 1 : 0);
   }
 }
 

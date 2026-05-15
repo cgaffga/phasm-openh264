@@ -253,6 +253,22 @@ void           phasm_stash_p_luma_clean_pres(const int16_t* clean_pres256);
 const int16_t* phasm_get_p_luma_clean_pres(void);
 
 /* ---------------------------------------------------------------------
+ * Phase C.9.1 Path A v2 (#449) per-MB dirty flags for P-frame inter +
+ * chroma. The snapshot site (in svc_encode_mb.cpp) OR-accumulates every
+ * coeff-hook return on this plane and calls `phasm_set_*_dirty(...)`;
+ * the consume site (in svc_encode_slice.cpp's OutputPMbWithout
+ * ConstructCsRsNoCopy P-frame branch) reads the flags and skips the
+ * entire dual-recon snapshot/restore/IDCT cycle when no plane is dirty
+ * and the MV override isn't active. `phasm_reset_dirty_flags()` is
+ * called after consuming so a stale set doesn't leak to the next MB.
+ * ------------------------------------------------------------------ */
+void           phasm_set_p_luma_dirty(int dirty);
+int            phasm_get_p_luma_dirty(void);
+void           phasm_set_chroma_dirty(int32_t iUV, int dirty);
+int            phasm_get_chroma_dirty(int32_t iUV);
+void           phasm_reset_dirty_flags(void);
+
+/* ---------------------------------------------------------------------
  * MvdSign cascade-break MC stash (Phase C.8.7)
  *
  * HOOK-H1 (svc_base_layer_md.cpp) and partition MVD sites mutate the
