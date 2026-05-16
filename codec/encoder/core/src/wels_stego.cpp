@@ -71,12 +71,31 @@ int16_t apply_sign_override(int16_t level, int new_sign_bit) {
 }
 
 // Translate a suffix-LSB override into a level with the new LSB.
+//
+// #505 fix 2026-05-16: at the threshold (|mag|=16), force the mutation
+// to go UP to 17 rather than DOWN to 15. The phasm walker enrolls
+// SuffixLsb cover positions only when `|coeff| >= 16` (see
+// `core/src/codec/h264/stego/inject.rs::COEFF_SUFFIX_LSB_THRESHOLD`),
+// so dropping below 16 would silently remove the position from the
+// walker's cover vector — shifting the combined-cover layout by 1
+// and breaking STC syndrome extraction. Mirrors the walker's
+// `flipped_magnitude(abs, threshold)` boundary-handling.
+//
+// The bit formula `(mag - 15) & 1` is equivalent to the walker's
+// `((mag & 1) ^ 1)` for all mag, so cover-bit observation stays
+// consistent across the boundary. Only the mutation direction at
+// mag=16 needs the special case.
 int16_t apply_suffix_lsb_coeff(int16_t level, int new_lsb_bit) {
   int16_t sign  = (level < 0) ? (int16_t)-1 : (int16_t)1;
   int16_t mag   = (level < 0) ? (int16_t)-level : level;
   int      cur_lsb = (mag - 15) & 1;
   if (cur_lsb == new_lsb_bit) return level;
-  int16_t new_mag = (cur_lsb == 0) ? (int16_t)(mag + 1) : (int16_t)(mag - 1);
+  int16_t new_mag;
+  if (mag == 16) {
+    new_mag = (int16_t)(mag + 1);
+  } else {
+    new_mag = (cur_lsb == 0) ? (int16_t)(mag + 1) : (int16_t)(mag - 1);
+  }
   return (int16_t)(sign * new_mag);
 }
 
@@ -115,7 +134,15 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   }
 
   int16_t abs_level = (level < 0) ? (int16_t)-level : level;
-  if (abs_level >= 15) {
+  // #505 fix 2026-05-16: threshold tightened from 15 to 16 to match the
+  // phasm walker's COEFF_SUFFIX_LSB_THRESHOLD = 16 in
+  // `core/src/codec/h264/stego/inject.rs`. Walker doesn't enroll
+  // cover positions at |coeff|=15 (the EG0(0) terminator-bin case),
+  // so firing the hook there created a divergence: fork would mutate
+  // |coeff|=16 → 15, position would vanish from walker's cover, cover
+  // layout shifts by 1, STC syndrome extraction breaks. Full analysis:
+  // `memory/h264_chroma_csl_cascade_gap_504.md`.
+  if (abs_level >= 16) {
     int32_t orig_lsb = (abs_level - 15) & 1;
     int32_t override_lsb = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SUFFIX_LSB, orig_lsb);
     if (override_lsb == 0 || override_lsb == 1) {
