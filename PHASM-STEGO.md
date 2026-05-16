@@ -28,10 +28,32 @@ advantages of OpenH264's SIMD paths are preserved.
 The phasm-stego patches add:
 - A C ABI surface (`codec/api/wels/wels_stego.h`) for registering
   encode-side and decode-side callbacks.
-- CABAC bin pre-emit hooks at four bypass-coded domains: coefficient
-  sign, coefficient suffix LSB, MVD sign, MVD suffix LSB.
+- **Encoder-side override hooks at four bypass-coded domains**, implemented
+  at two distinct points in the encoder pipeline:
+  - **Coefficient sign + coefficient suffix LSB**: fired at CABAC
+    bin pre-emit time during residual writes, via stage-specific
+    HOOK-A..HOOK-G sites in `codec/encoder/core/src/svc_encode_mb.cpp`.
+    The callback's return value overrides the bypass bit about to
+    be emitted, with a dual-recon mirror keeping pDecPic clean.
+  - **MVD sign + MVD suffix LSB**: fired at motion-decision time
+    (after `MeRefineFracPixel` finalizes the qpel MV, before the
+    MB commits its motion info) via HOOK-H1..H7 in
+    `codec/encoder/core/src/svc_base_layer_md.cpp` + the
+    `phasm_apply_mvd_hooks` helper in `codec/encoder/core/src/wels_stego.cpp`.
+    The callback receives the would-be MVD sign / suffix-LSB; the
+    helper mutates the qpel MV in place if the override differs, and
+    the encoder re-runs MC at the modified MV. The CABAC bin emitted
+    later in `WelsCabacMbMvdLx` reflects the modified MV by
+    construction (sMvd is recomputed from the updated sMv − sMvp).
+    The C.8.7 v1.1 cascade-break stashes the CLEAN-MV MC and lets
+    `OutputPMb` shift pDecPic by `(CLEAN_MC − STEGO_MC)`, keeping
+    the encoder reference clean for next-frame ME while
+    `pVisualRecPic` captures the actual decoder-equivalent recon.
 - Mode-decision cost-vector capture for stego rate-distortion planning.
-- Decoder-side bin-read post-hooks for stego extraction.
+- **Decoder-side bin-read post-hooks at four bypass-coded domains**
+  (coefficient sign, coefficient suffix LSB, MVD sign, MVD suffix LSB)
+  in `codec/decoder/core/src/parse_mb_syn_cabac.cpp` — extracted
+  bits drive phasm's STC decode.
 - Deterministic-build defaults (single-thread, scene-change detection
   off, etc.) for cross-platform reproducibility.
 
