@@ -188,58 +188,88 @@ TEST(PhasmCoeffHooks, SignNoOpWhenOverrideMatches) {
   TearDownMock();
 }
 
-TEST(PhasmCoeffHooks, SuffixLsbFiresOnlyWhenAbsAtLeast15) {
-  // |level|=14: no suffix domain → only sign domain dispatched.
+// =====================================================================
+// #505 / 2026-05-16 — suffix-LSB hook fires at |level| >= 16, matching
+// the phasm walker's COEFF_SUFFIX_LSB_THRESHOLD = 16 in
+// core/src/codec/h264/stego/inject.rs. Walker doesn't enroll cover
+// positions at |coeff|=15, so firing the hook there caused a layout
+// divergence (encoder mutated 16→15, walker missed the position, STC
+// syndrome shifted). Boundary protection at mag==16 forces +1 to
+// mag=17 instead of -1 to mag=15, keeping the level above threshold.
+// =====================================================================
+
+TEST(PhasmCoeffHooks, SuffixLsbDoesNotFireBelowThreshold) {
+  // |level|=14 (below threshold 16): only sign domain dispatched.
   RegisterMock({-1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 14;
   EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
-  EXPECT_EQ(1u, g_mock_history_count);  // only one (sign) call
+  EXPECT_EQ(1u, g_mock_history_count);
   EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN, g_mock_history[0].pos.domain);
   TearDownMock();
 }
 
-TEST(PhasmCoeffHooks, SuffixLsbFlipFrom15To16) {
-  // |level|=15 has suffix value 0, LSB=0. Override LSB=1 → |level|=16.
-  RegisterMock({-1, 1});  // sign no-op, suffix→1
+TEST(PhasmCoeffHooks, SuffixLsbDoesNotFireAtLevel15) {
+  // |level|=15 (just below threshold 16 per #505): only sign domain
+  // dispatches. Pre-#505 this fired the suffix-LSB hook and walker
+  // missed the position.
+  RegisterMock({-1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 15;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
-  EXPECT_EQ(16, level);
-  EXPECT_EQ(2u, g_mock_history_count);
-  EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN,        g_mock_history[0].pos.domain);
-  EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB,  g_mock_history[1].pos.domain);
-  EXPECT_EQ(0, g_mock_history[1].original_bit);  // original LSB of |15-15|=0 is 0
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1u, g_mock_history_count);
+  EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN, g_mock_history[0].pos.domain);
   TearDownMock();
 }
 
-TEST(PhasmCoeffHooks, SuffixLsbFlipFrom16To15PreservesNonZero) {
-  RegisterMock({-1, 0});
+TEST(PhasmCoeffHooks, SuffixLsbFlipFrom16PromotesTo17) {
+  // |level|=16 has suffix value (16-15)=1, LSB=1. Override LSB=0 would
+  // normally decrement to mag=15 — but #505 boundary protection forces
+  // +1 instead, sending |level|=17. Keeps the position at-or-above
+  // walker threshold.
+  RegisterMock({-1, 0});  // sign no-op, suffix→0
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 16;
   EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
-  EXPECT_EQ(15, level);
+  EXPECT_EQ(17, level);
+  EXPECT_EQ(2u, g_mock_history_count);
+  EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN,        g_mock_history[0].pos.domain);
+  EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB,  g_mock_history[1].pos.domain);
+  EXPECT_EQ(1, g_mock_history[1].original_bit);  // original LSB of |16-15|=1 is 1
+  TearDownMock();
+}
+
+TEST(PhasmCoeffHooks, SuffixLsbFlipFrom17To18) {
+  // |level|=17 has suffix value (17-15)=2, LSB=0. Override LSB=1 →
+  // normal +1 increment to |level|=18 (no boundary special case here).
+  RegisterMock({-1, 1});
+  PhasmStegoPos pos = MakeBasePos();
+  int16_t level = 17;
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(18, level);
   TearDownMock();
 }
 
 TEST(PhasmCoeffHooks, SuffixLsbPreservesNegativeSign) {
+  // |level|=-17, override LSB=1 → |level|=18, sign preserved → -18.
   RegisterMock({-1, 1});
   PhasmStegoPos pos = MakeBasePos();
-  int16_t level = -15;
+  int16_t level = -17;
   EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
-  EXPECT_EQ(-16, level);
+  EXPECT_EQ(-18, level);
   TearDownMock();
 }
 
 TEST(PhasmCoeffHooks, BothSignAndSuffixFireInOrder) {
-  // Sign override + Suffix LSB override on the same coeff.
+  // Sign override + Suffix LSB override on the same coeff. With #505
+  // threshold = 16, start at |level|=17 so suffix hook fires.
   RegisterMock({1, 1});  // sign→1 (negate), suffix→1 (flip LSB)
   PhasmStegoPos pos = MakeBasePos();
-  int16_t level = 15;  // positive
+  int16_t level = 17;  // positive
   EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
-  // Sign first: 15 → -15. Suffix second on -15: |level|=15, LSB=0 → flip to LSB=1
-  // → |level|=16, sign preserved → -16.
-  EXPECT_EQ(-16, level);
+  // Sign first: 17 → -17. Suffix second on -17: |level|=17, LSB=0 →
+  // flip to LSB=1 → |level|=18, sign preserved → -18.
+  EXPECT_EQ(-18, level);
   EXPECT_EQ(2u, g_mock_history_count);
   TearDownMock();
 }
