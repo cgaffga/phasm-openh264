@@ -66,12 +66,16 @@ typedef struct PhasmMvHookCtx {
  * bodies in svc_encode_mb.cpp + svc_base_layer_md.cpp (Stages 1-7) to
  * read the current frame number set via WelsStegoSetFrameNum, etc.
  * ------------------------------------------------------------------ */
-uint32_t                PhasmStegoGetFrameNum(void);
-PhasmStegoEncPreEmitFn  PhasmStegoGetEncPreEmit(void);
-PhasmStegoDecPostReadFn PhasmStegoGetDecPostRead(void);
-PhasmStegoMdCostFn      PhasmStegoGetMdCostCapture(void);
-PhasmStegoDualReconFn   PhasmStegoGetDualReconObserve(void);
-void*                   PhasmStegoGetUserData(void);
+uint32_t                       PhasmStegoGetFrameNum(void);
+PhasmStegoEncPreEmitFn         PhasmStegoGetEncPreEmit(void);
+PhasmStegoDecPostReadFn        PhasmStegoGetDecPostRead(void);
+PhasmStegoMdCostFn             PhasmStegoGetMdCostCapture(void);
+PhasmStegoDualReconFn          PhasmStegoGetDualReconObserve(void);
+/* ABI 1.3.0+ accessors (Pass-2 replay architecture, Option A). */
+PhasmStegoCaptureMbDecisionFn  PhasmStegoGetCaptureMbDecision(void);
+PhasmStegoReplayMbDecisionFn   PhasmStegoGetReplayMbDecision(void);
+PhasmStegoPassMode             PhasmStegoGetPassMode(void);
+void*                          PhasmStegoGetUserData(void);
 
 /* ---------------------------------------------------------------------
  * phasm_apply_coeff_hooks

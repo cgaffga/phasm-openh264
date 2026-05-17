@@ -289,12 +289,115 @@ typedef void (*PhasmStegoDualReconFn)(uint32_t frame_num,
  * the caller compiled against so the encoder can detect old callers.
  * ------------------------------------------------------------------ */
 
+/* ---------------------------------------------------------------------
+ * 6.7 Pass-2 replay architecture (ABI 1.3.0+)
+ *
+ * Option A — see `docs/design/video/h264/pass2-replay-architecture.md`
+ * in the phasm repo. Closes the cascade-safety whack-a-mole loop by
+ * letting Pass-1 capture the encoder's complete per-MB mode decision
+ * and Pass-2 force-replay those decisions, short-circuiting RDO/ME.
+ *
+ * `PhasmStegoMbDecision` is the per-MB cache record. Fields not
+ * relevant to the chosen mb_type are unused by the encoder during
+ * replay (e.g. intra-pred-mode arrays are ignored for P_16x16; MV
+ * arrays are ignored for intra MBs). The caller cache MUST round-trip
+ * the bytes through itself without interpreting them — anything the
+ * encoder writes during capture, it expects to read back during
+ * replay verbatim.
+ *
+ * `PhasmStegoPassMode` selects encoder behaviour:
+ *   PASSTHROUGH (0) = default; no capture/replay (pre-1.3.0 behaviour).
+ *   CAPTURE     (1) = encoder runs RDO/ME, calls capture callback
+ *                     once per MB with finalized decision.
+ *   REPLAY      (2) = encoder calls replay callback at each MB entry;
+ *                     if returns 1, populates state from
+ *                     *out_decision and skips RDO/ME; if 0, falls
+ *                     back to RDO/ME (e.g. cache miss).
+ * ------------------------------------------------------------------ */
+
+typedef enum PhasmStegoPassMode {
+  PHASM_PASS_PASSTHROUGH = 0,
+  PHASM_PASS_CAPTURE     = 1,
+  PHASM_PASS_REPLAY      = 2,
+} PhasmStegoPassMode;
+
+typedef struct PhasmStegoMbDecision {
+  /* === Identity === */
+  uint32_t frame_num;              /* set via WelsStegoSetFrameNum */
+  uint16_t mb_x;                   /* macroblock column (MB units) */
+  uint16_t mb_y;                   /* macroblock row */
+
+  /* === Top-level mb_type === */
+  uint8_t  mb_type;                /* PHASM_MB_TYPE_* classification */
+  uint8_t  ui_mb_type;             /* OH264-internal MB_TYPE_* raw value */
+  uint8_t  sub_mb_type[4];         /* P_8x8 / B_8x8 per-8x8 sub-mode */
+  int8_t   qp_delta;               /* signed; 0 in CQP mode */
+  uint8_t  _pad0;                  /* 4-byte align */
+
+  /* === Motion (per 4x4 sub-block × 2 reference lists) ===
+   * mv_x/y[4x4_scan_idx][list]. For non-B-slice modes, list-1 entries
+   * are zero. For partition modes (16x16, 16x8, 8x16, 8x8 + subs),
+   * the 4x4 slots within a partition share the same MV — the encoder
+   * writes the same value to all relevant 4x4 entries during capture
+   * so replay just copies them back to pCurMb->sMv[]. */
+  int16_t  mv_x[16][2];            /* qpel MV x per 4x4 per list */
+  int16_t  mv_y[16][2];            /* qpel MV y */
+  int8_t   ref_idx[4][2];          /* per-partition × list */
+  uint8_t  bipred_dir[4];          /* B-slice per partition: 0=L0 1=L1 2=Bi 3=Direct */
+
+  /* === Intra prediction === */
+  uint8_t  intra16_pred_mode;      /* I_16x16 only (0..3) */
+  uint8_t  i4x4_pred_mode[16];     /* I_4x4 only (per 4x4 sub-block, 0..8) */
+  uint8_t  chroma_pred_mode;       /* I-slice + intra-in-P */
+
+  /* === Padding / future expansion === */
+  uint8_t  _reserved[6];
+} PhasmStegoMbDecision;  /* 176 bytes */
+
+/* Pass-1 capture callback. Fires once per MB AFTER mode decision is
+ * finalized and BEFORE WelsInterMbEncode / WelsIMbChromaEncode runs
+ * the residual + CABAC emit pipeline. Pure observation; no return.
+ * Consumer copies `decision` into its own cache keyed by (frame_num,
+ * mb_x, mb_y).
+ *
+ * Lifetime: `decision` is valid only for the call duration. Copy.
+ * Reentrancy: the encoder may evaluate multiple candidate modes per
+ * MB during RDO and call capture multiple times for the same MB; the
+ * caller should accept "last write wins" semantics. */
+typedef void (*PhasmStegoCaptureMbDecisionFn)(
+    const PhasmStegoMbDecision* decision,
+    void* user_data);
+
+/* Pass-2 replay callback. Fires at the START of each MB's mode
+ * decision in the encoder. Consumer fills *out_decision with the
+ * cached decision and returns 1; returns 0 if no cache entry for
+ * this MB (encoder falls back to running RDO/ME as usual).
+ *
+ * Determinism: returning 1 with a partially-filled decision is a
+ * caller bug; the consumer MUST fill every field the encoder will
+ * read. Phasm's cache is per-GOP and populated by Pass-1, so misses
+ * indicate a frame_num / coordinate mismatch — return 0 and let
+ * RDO/ME run (gate harness flags it). */
+typedef int (*PhasmStegoReplayMbDecisionFn)(
+    uint32_t frame_num,
+    uint16_t mb_x,
+    uint16_t mb_y,
+    PhasmStegoMbDecision* out_decision,
+    void* user_data);
+
+/* Set encoder's pass mode for the next encode() call. Caller sets
+ * before each pass (typically: CAPTURE for Pass-1, REPLAY for
+ * Pass-2). Default after fresh registration is PASSTHROUGH. */
+void WelsStegoSetPassMode(PhasmStegoPassMode mode);
+
 typedef struct PhasmStegoCallbacks {
-  size_t                   struct_size;       /* sizeof(PhasmStegoCallbacks) at compile time */
-  PhasmStegoEncPreEmitFn   enc_pre_emit;      /* encoder bin pre-emit */
-  PhasmStegoDecPostReadFn  dec_post_read;     /* decoder bin post-read */
-  PhasmStegoMdCostFn       md_cost_capture;   /* per-MB cost capture */
-  PhasmStegoDualReconFn    dual_recon_observe;/* per-block dual-recon observe (ABI 1.2.0+) */
+  size_t                          struct_size;            /* sizeof(PhasmStegoCallbacks) at compile time */
+  PhasmStegoEncPreEmitFn          enc_pre_emit;           /* encoder bin pre-emit */
+  PhasmStegoDecPostReadFn         dec_post_read;          /* decoder bin post-read */
+  PhasmStegoMdCostFn              md_cost_capture;        /* per-MB cost capture */
+  PhasmStegoDualReconFn           dual_recon_observe;     /* per-block dual-recon observe (ABI 1.2.0+) */
+  PhasmStegoCaptureMbDecisionFn   capture_mb_decision;    /* Pass-1 capture (ABI 1.3.0+) */
+  PhasmStegoReplayMbDecisionFn    replay_mb_decision;     /* Pass-2 replay (ABI 1.3.0+) */
 } PhasmStegoCallbacks;
 
 /* ---------------------------------------------------------------------
@@ -332,14 +435,16 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
  * breaking changes; MINOR on additive (new callback fields appended
  * to the end of structs); PATCH on doc-only changes.
  *
- * Current version: 1.2.0 (0x010200). 1.2.0 adds the
- * `dual_recon_observe` callback (Phase C.8.2) for per-block visibility
- * into the clean-vs-stego reconstruction pair the encoder commits to
- * pDecPic + pVisualRecPic respectively. 1.1.0 wired `md_cost_capture`;
- * 1.0.0 shipped the original 3 callbacks.
+ * Current version: 1.3.0 (0x010300). 1.3.0 adds Pass-2 replay
+ * architecture (Option A): `PhasmStegoMbDecision` struct + capture /
+ * replay callbacks + `WelsStegoSetPassMode`. Closes the cascade-
+ * safety cycle by letting Pass-1 capture full mode decisions and
+ * Pass-2 force-replay them. 1.2.0 added `dual_recon_observe` (Phase
+ * C.8.2). 1.1.0 wired `md_cost_capture`. 1.0.0 shipped the original
+ * 3 callbacks.
  * ------------------------------------------------------------------ */
 
-#define PHASM_STEGO_ABI_VERSION 0x010200u
+#define PHASM_STEGO_ABI_VERSION 0x010300u
 uint32_t WelsStegoAbiVersion(void);
 
 /* ---------------------------------------------------------------------
