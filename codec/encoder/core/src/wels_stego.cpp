@@ -738,10 +738,37 @@ static uint8_t* phasm_scratch_slot(uint8_t domain,
   }
 }
 
+/* Phase 4.6 NEGATIVE-result diagnostic counters. Track writes /
+ * reads / hits / resets on the bypass scratch to bisect why the
+ * forged-flip test sees byte-identical bitstreams despite 16
+ * dispatched flips. Removed once 4.6 closes positively. */
+static std::atomic<uint64_t> g_phasm_diag_set_calls{0};
+static std::atomic<uint64_t> g_phasm_diag_set_writes{0};
+static std::atomic<uint64_t> g_phasm_diag_set_rejected_oob{0};
+static std::atomic<uint64_t> g_phasm_diag_apply_calls{0};
+static std::atomic<uint64_t> g_phasm_diag_apply_hits{0};
+static std::atomic<uint64_t> g_phasm_diag_reset_calls{0};
+
+uint64_t phasm_diag_get_set_calls(void)         { return g_phasm_diag_set_calls.load(); }
+uint64_t phasm_diag_get_set_writes(void)        { return g_phasm_diag_set_writes.load(); }
+uint64_t phasm_diag_get_set_rejected_oob(void)  { return g_phasm_diag_set_rejected_oob.load(); }
+uint64_t phasm_diag_get_apply_calls(void)       { return g_phasm_diag_apply_calls.load(); }
+uint64_t phasm_diag_get_apply_hits(void)        { return g_phasm_diag_apply_hits.load(); }
+uint64_t phasm_diag_get_reset_calls(void)       { return g_phasm_diag_reset_calls.load(); }
+void phasm_diag_reset_counters(void) {
+  g_phasm_diag_set_calls.store(0);
+  g_phasm_diag_set_writes.store(0);
+  g_phasm_diag_set_rejected_oob.store(0);
+  g_phasm_diag_apply_calls.store(0);
+  g_phasm_diag_apply_hits.store(0);
+  g_phasm_diag_reset_calls.store(0);
+}
+
 void phasm_reset_bypass_overrides(void) {
   /* Zero-init = "no override" across the whole table. memset is
    * cheap (~2.6 KB, fits in one cache line per array element row). */
   std::memset(&g_phasm_bypass_overrides, 0, sizeof(g_phasm_bypass_overrides));
+  g_phasm_diag_reset_calls.fetch_add(1, std::memory_order_relaxed);
 }
 
 /* Populate a single slot. Caller passes the OVERRIDE BIN (0 or 1);
@@ -753,20 +780,27 @@ void phasm_reset_bypass_overrides(void) {
 void phasm_set_bypass_override(uint8_t domain,
                                 const PhasmStegoPos* pos,
                                 int override_bin) {
+  g_phasm_diag_set_calls.fetch_add(1, std::memory_order_relaxed);
   if (override_bin != 0 && override_bin != 1) return;
   uint8_t* slot = phasm_scratch_slot(domain, pos);
-  if (slot == nullptr) return;
+  if (slot == nullptr) {
+    g_phasm_diag_set_rejected_oob.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   *slot = (uint8_t)(override_bin + 1);  /* 0→1, 1→2 */
+  g_phasm_diag_set_writes.fetch_add(1, std::memory_order_relaxed);
 }
 
 /* Phase 4.5.a wire-up: read scratch at emit time. */
 int phasm_apply_bypass_bin_override (uint8_t domain,
                                       const PhasmStegoPos* pos,
                                       int orig_bin) {
+  g_phasm_diag_apply_calls.fetch_add(1, std::memory_order_relaxed);
   uint8_t* slot = phasm_scratch_slot(domain, pos);
   if (slot == nullptr) return orig_bin;
   const uint8_t v = *slot;
   if (v == 0) return orig_bin;
+  g_phasm_diag_apply_hits.fetch_add(1, std::memory_order_relaxed);
   return (int)(v - 1);  /* 1→0, 2→1 */
 }
 
