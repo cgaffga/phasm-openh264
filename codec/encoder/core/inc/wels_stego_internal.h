@@ -334,49 +334,6 @@ int            phasm_get_slice_override_count(void);
 void           phasm_reset_slice_override_count(void);
 
 /* ---------------------------------------------------------------------
- * MvdSign cascade-break MC stash (Phase C.8.7)
- *
- * HOOK-H1 (svc_base_layer_md.cpp) and partition MVD sites mutate the
- * P-frame MV and re-run MC at the STEGO MV so the bitstream is decoder-
- * consistent. That writes STEGO_MC into pMemPredLuma → pDecPic carries
- * STEGO_MC + residual = polluted next-frame reference. To restore a
- * clean encoder reference WHILE keeping the wire correct, HOOK-H1 also
- * computes MC at the PRE-override (clean) MV into these stashes:
- *   - luma:  256 packed bytes (stride 16, 16x16)
- *   - chroma: 64 packed bytes per plane (stride 8, 8x8); iUV ∈ {0=Cb, 1=Cr}
- *
- * The `active` flag is sticky per-MB: HOOK-H1 sets it to 1 if the helper
- * actually overrode the MV. OutputPMbWithoutConstructCsRsNoCopy in
- * svc_encode_slice.cpp reads it; if active, shifts pDecPic by
- * (CLEAN_MC − STEGO_MC) so the encoder reference is restored to clean,
- * then clears the flag. pVisualRecPic mirrors the actual decoder
- * reconstruction (STEGO_MC + stego_residual).
- *
- * Scope: per-MB. Single-threaded encoder default (#339 multi-thread
- * revisit). For C.8.7 v1.0, only P_16x16 (HOOK-H1) populates these;
- * partitioned modes (HOOK-H2..H7) come later when v1.0 ships.
- * ------------------------------------------------------------------ */
-void           phasm_set_mv_override_active(int active);
-int            phasm_get_mv_override_active(void);
-void           phasm_stash_mv_clean_mc_luma(const uint8_t* clean_mc_256);
-const uint8_t* phasm_get_mv_clean_mc_luma(void);
-void           phasm_stash_mv_clean_mc_chroma(int32_t iUV, const uint8_t* clean_mc_64);
-const uint8_t* phasm_get_mv_clean_mc_chroma(int32_t iUV);
-
-/* C.8.7 v1.1 — partitioned-mode slot population for the MvdSign cascade
- * stash. Partitions write their slice (w × h) starting at (dst_x, dst_y)
- * within the 16×16 (luma) or 8×8 (chroma) packed stash buffer. Caller
- * computes the slot offset from g_kuiSmb4AddrIn256[iIdx] and the
- * partition shape (16x8, 8x16, 8x8, sub-MB types). Bounds-checked. */
-void phasm_stash_mv_clean_mc_luma_slot(int32_t dst_x, int32_t dst_y,
-                                        int32_t w, int32_t h,
-                                        const uint8_t* src, int32_t src_stride);
-void phasm_stash_mv_clean_mc_chroma_slot(int32_t iUV,
-                                          int32_t dst_x, int32_t dst_y,
-                                          int32_t w, int32_t h,
-                                          const uint8_t* src, int32_t src_stride);
-
-/* ---------------------------------------------------------------------
  * Phase 4.5 (#538) — bypass-bin scratch table.
  *
  * Dense per-MB storage for stego bin overrides, read at CABAC emit

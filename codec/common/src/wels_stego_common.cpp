@@ -137,22 +137,6 @@ int16_t g_phasm_chroma_clean_pres[2][64] = {{0}, {0}};
 // layout). Single-threaded encoder default (#339 tracks revisit).
 int16_t g_phasm_p_luma_clean_pres[256] = {0};
 
-// C.8.7 MvdSign cascade-break stashes: when a P_16x16 MV is mutated by
-// HOOK-H1 (apply_mvd_sign_override), the encoder's MC pred buffer is
-// re-computed at the STEGO MV so the wire is internally consistent. But
-// the encoder's pDecPic then carries STEGO_MC + residual = polluted
-// reference for next-frame ME. To cascade-break: also compute MC at the
-// CLEAN (pre-override) MV into these stashes; OutputPMb later shifts
-// pDecPic by (CLEAN_MC − STEGO_MC) so the encoder reference stays clean,
-// while pVisualRecPic captures the actual decoder reconstruction.
-//
-// Active flag is sticky per-MB: HOOK-H1 sets to 1 if it fires; OutputPMb
-// clears to 0 after consuming. 256 bytes luma, 64+64 chroma; matches the
-// MC pred layout passed to pMcLumaFunc / pMcChromaFunc with stride 16/8.
-uint8_t g_phasm_mv_clean_mc_luma[256] = {0};
-uint8_t g_phasm_mv_clean_mc_chroma[2][64] = {{0}, {0}};
-int     g_phasm_mv_override_active = 0;
-
 // Phase C.9.1 Path A v2 (#449) per-MB dirty flags for the P-frame inter
 // + chroma stashes. Each setter is called at the snapshot+hook site (in
 // svc_encode_mb.cpp) with the OR-accumulated return of every coeff hook
@@ -268,58 +252,6 @@ int phasm_get_slice_override_count(void) {
 
 void phasm_reset_slice_override_count(void) {
   g_phasm_slice_override_count = 0;
-}
-
-void phasm_set_mv_override_active(int active) {
-  g_phasm_mv_override_active = (active != 0) ? 1 : 0;
-}
-
-int phasm_get_mv_override_active(void) {
-  return g_phasm_mv_override_active;
-}
-
-void phasm_stash_mv_clean_mc_luma(const uint8_t* clean_mc_256) {
-  if (clean_mc_256 == nullptr) return;
-  std::memcpy(g_phasm_mv_clean_mc_luma, clean_mc_256, 256);
-}
-
-const uint8_t* phasm_get_mv_clean_mc_luma(void) {
-  return g_phasm_mv_clean_mc_luma;
-}
-
-void phasm_stash_mv_clean_mc_chroma(int32_t iUV, const uint8_t* clean_mc_64) {
-  if (iUV < 0 || iUV > 1 || clean_mc_64 == nullptr) return;
-  std::memcpy(g_phasm_mv_clean_mc_chroma[iUV], clean_mc_64, 64);
-}
-
-const uint8_t* phasm_get_mv_clean_mc_chroma(int32_t iUV) {
-  if (iUV < 0 || iUV > 1) return nullptr;
-  return g_phasm_mv_clean_mc_chroma[iUV];
-}
-
-void phasm_stash_mv_clean_mc_luma_slot(int32_t dst_x, int32_t dst_y,
-                                        int32_t w, int32_t h,
-                                        const uint8_t* src, int32_t src_stride) {
-  if (src == nullptr || w <= 0 || h <= 0) return;
-  if (dst_x < 0 || dst_y < 0 || dst_x + w > 16 || dst_y + h > 16) return;
-  for (int32_t row = 0; row < h; ++row) {
-    std::memcpy(&g_phasm_mv_clean_mc_luma[(dst_y + row) * 16 + dst_x],
-                src + (size_t)row * (size_t)src_stride,
-                (size_t)w);
-  }
-}
-
-void phasm_stash_mv_clean_mc_chroma_slot(int32_t iUV,
-                                          int32_t dst_x, int32_t dst_y,
-                                          int32_t w, int32_t h,
-                                          const uint8_t* src, int32_t src_stride) {
-  if (iUV < 0 || iUV > 1 || src == nullptr || w <= 0 || h <= 0) return;
-  if (dst_x < 0 || dst_y < 0 || dst_x + w > 8 || dst_y + h > 8) return;
-  for (int32_t row = 0; row < h; ++row) {
-    std::memcpy(&g_phasm_mv_clean_mc_chroma[iUV][(dst_y + row) * 8 + dst_x],
-                src + (size_t)row * (size_t)src_stride,
-                (size_t)w);
-  }
 }
 
 // ---------------------------------------------------------------------

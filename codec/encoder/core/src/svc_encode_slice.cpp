@@ -676,11 +676,9 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
       const int phasm_dr_p_luma_dirty       = phasm_get_p_luma_dirty();
       const int phasm_dr_chroma_cb_dirty    = phasm_get_chroma_dirty(0);
       const int phasm_dr_chroma_cr_dirty    = phasm_get_chroma_dirty(1);
-      const int phasm_dr_mv_active_at_entry = phasm_get_mv_override_active();
       if (!phasm_dr_p_luma_dirty
           && !phasm_dr_chroma_cb_dirty
-          && !phasm_dr_chroma_cr_dirty
-          && !phasm_dr_mv_active_at_entry) {
+          && !phasm_dr_chroma_cr_dirty) {
         uint8_t phasm_dr_recon_y[256], phasm_dr_recon_u[64], phasm_dr_recon_v[64];
         for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
           memcpy(phasm_dr_recon_y + phasm_y * 16,
@@ -749,50 +747,6 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
         int16_t clean_v_work[64];
         memcpy(clean_v_work, clean_v, sizeof(int16_t) * 64);
         pfIdctFour4x4 (pDecV, kiDecStrideChroma, pDecV, kiDecStrideChroma, clean_v_work);
-      }
-      /* C.8.7 MvdSign cascade-break: when HOOK-H1 mutated the MV for this
-       * MB, pDecY/U/V currently = STEGO_MC + clean_RES. The stego MV is
-       * decoder-consistent (wire emits stego MV, decoder MCs at stego),
-       * but the encoder's pDecPic should reference CLEAN_MC so next-frame
-       * ME doesn't see polluted history. Shift by (CLEAN_MC − STEGO_MC):
-       *   pDecPic[i] = pDecPic[i] + clean_mc[i] − stego_mc[i]   (clamped)
-       * STEGO_MC for this MB is phasm_dr_pred_y/u/v (captured at the
-       * pre-IDCT snapshot above). CLEAN_MC came from the HOOK-H1 site.
-       * pVisualRecPic still mirrors phasm_dr_stego_y/u/v = STEGO_MC +
-       * stego_RES (the actual decoder reconstruction). After the shift,
-       * clear the active flag so the next MB doesn't re-apply.   */
-      const int phasm_dr_mv_active = phasm_get_mv_override_active();
-      if (phasm_dr_mv_active) {
-        const uint8_t* phasm_mv_clean_y = phasm_get_mv_clean_mc_luma();
-        const uint8_t* phasm_mv_clean_u = phasm_get_mv_clean_mc_chroma(0);
-        const uint8_t* phasm_mv_clean_v = phasm_get_mv_clean_mc_chroma(1);
-        for (int32_t phasm_y = 0; phasm_y < 16; ++phasm_y) {
-          for (int32_t phasm_x = 0; phasm_x < 16; ++phasm_x) {
-            const size_t pic_off = (size_t)phasm_y * (size_t)kiDecStrideLuma
-                                 + (size_t)phasm_x;
-            const size_t pak_off = (size_t)phasm_y * 16 + (size_t)phasm_x;
-            int32_t v = (int32_t)pDecY[pic_off]
-                      + (int32_t)phasm_mv_clean_y[pak_off]
-                      - (int32_t)phasm_dr_pred_y[pak_off];
-            pDecY[pic_off] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
-          }
-        }
-        for (int32_t phasm_y = 0; phasm_y < 8; ++phasm_y) {
-          for (int32_t phasm_x = 0; phasm_x < 8; ++phasm_x) {
-            const size_t pic_off = (size_t)phasm_y * (size_t)kiDecStrideChroma
-                                 + (size_t)phasm_x;
-            const size_t pak_off = (size_t)phasm_y * 8 + (size_t)phasm_x;
-            int32_t u = (int32_t)pDecU[pic_off]
-                      + (int32_t)phasm_mv_clean_u[pak_off]
-                      - (int32_t)phasm_dr_pred_u[pak_off];
-            pDecU[pic_off] = (uint8_t)(u < 0 ? 0 : (u > 255 ? 255 : u));
-            int32_t vv = (int32_t)pDecV[pic_off]
-                       + (int32_t)phasm_mv_clean_v[pak_off]
-                       - (int32_t)phasm_dr_pred_v[pak_off];
-            pDecV[pic_off] = (uint8_t)(vv < 0 ? 0 : (vv > 255 ? 255 : vv));
-          }
-        }
-        phasm_set_mv_override_active(0);
       }
       /* Capture compact CLEAN snapshots AFTER recompute so the observe
        * callback receives both pointers (writeback fires observe only
