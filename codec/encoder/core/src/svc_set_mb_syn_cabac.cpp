@@ -302,7 +302,19 @@ void WelsCabacMbRef (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbCache, int1
   WelsCabacEncodeDecision (pCabacCtx, 54 + iCtx, 0);
 }
 
-inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, int32_t iPredMvd) {
+/* #538 Phase 4.3 — MvdSign wire-only override.
+ *
+ * Extended signature: pCurMb_iMbX / pCurMb_iMbY / partition_idx /
+ * mv_component thread the position context from the call site
+ * (WelsCabacMbMvd, two levels up) into the bypass-bin emit so the
+ * hook can build a complete PhasmStegoPos. The function stays
+ * `inline` — same compiler treatment, just more registers.
+ *
+ * Stub (`phasm_apply_bypass_bin_override`) returns `orig_bin`
+ * unconditionally; byte-identical to pre-Phase-4.3. */
+inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, int32_t iPredMvd,
+                              uint16_t phasm_mb_x, uint16_t phasm_mb_y,
+                              uint8_t  phasm_partition_idx, uint8_t phasm_mv_component) {
   const int32_t iAbsMvd = WELS_ABS (sMvd);
   int32_t iCtxInc = 0;
   int32_t iPrefix = WELS_MIN (iAbsMvd, 9);
@@ -314,6 +326,19 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
     iCtxInc += 1;
 
   if (iPrefix) {
+    PhasmStegoPos phasm_pos;
+    phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos.mb_x          = phasm_mb_x;
+    phasm_pos.mb_y          = phasm_mb_y;
+    phasm_pos.partition_idx = phasm_partition_idx;
+    phasm_pos.sub_block     = 0xff;
+    phasm_pos.coeff_idx     = 0xff;
+    phasm_pos.block_cat     = 0xff;
+    phasm_pos.ref_idx       = 0;
+    phasm_pos.mv_component  = phasm_mv_component;
+    phasm_pos.domain        = (uint8_t)PHASM_DOMAIN_MVD_SIGN;
+    phasm_pos._reserved     = 0;
+    const int phasm_orig_sign = (sMvd < 0) ? 1 : 0;
     if (iPrefix < 9) {
       WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 1);
       iCtxInc = 3;
@@ -323,7 +348,9 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
           iCtxInc++;
       }
       WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 0);
-      WelsCabacEncodeBypassOne (pCabacCtx, sMvd < 0);
+      const int phasm_bin = phasm_apply_bypass_bin_override (
+          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign);
+      WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
     } else {
       WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 1);
       iCtxInc = 3;
@@ -333,7 +360,9 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
           iCtxInc++;
       }
       WelsCabacEncodeUeBypass (pCabacCtx, 3, iAbsMvd - 9);
-      WelsCabacEncodeBypassOne (pCabacCtx, sMvd < 0);
+      const int phasm_bin = phasm_apply_bypass_bin_override (
+          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign);
+      WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
     }
   } else {
     WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 0);
@@ -363,8 +392,17 @@ SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
   iAbsMvd0 = WELS_ABS (sMvdLeft.iMvX) + WELS_ABS (sMvdTop.iMvX);
   iAbsMvd1 = WELS_ABS (sMvdLeft.iMvY) + WELS_ABS (sMvdTop.iMvY);
 
-  WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvX, 40, iAbsMvd0);
-  WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvY, 47, iAbsMvd1);
+  /* #538 Phase 4.3 — pass position context to WelsCabacMbMvdLx so the
+   * MvdSign wire-only override hook can build a complete pos. The
+   * `i4x4ScanIdx` parameter doubles as the partition_idx for hooks
+   * that operate per-4x4 (partitioned 8x8 / 4x4 / 8x4 / 4x8 modes).
+   * For non-partitioned MBs the caller passes 0. */
+  WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvX, 40, iAbsMvd0,
+                    (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                    (uint8_t)i4x4ScanIdx, /*mv_component=*/0);
+  WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvY, 47, iAbsMvd1,
+                    (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+                    (uint8_t)i4x4ScanIdx, /*mv_component=*/1);
   return sMvd;
 }
 static void WelsCabacSubMbType (SCabacCtx* pCabacCtx, SMB* pCurMb) {
