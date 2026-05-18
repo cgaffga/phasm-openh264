@@ -187,6 +187,21 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
 void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision);
 
 /* ---------------------------------------------------------------------
+ * phasm_fetch_replay_decision (#533.3 Pass-2 replay)
+ *
+ * If pass_mode == PHASM_PASS_REPLAY and a replay_mb_decision callback
+ * is registered, invoke it with the current frame_num + (mb_x, mb_y).
+ * On hit (callback returns 1), `*out_decision` is populated with the
+ * cached decision and this function returns 1. On miss / disabled
+ * pass / no callback, returns 0 and *out_decision is untouched.
+ *
+ * Callers in svc_base_layer_md.cpp use the result to short-circuit
+ * RDO/ME and reconstruct from the cached decision directly. Cache
+ * miss falls back to the normal mode-decision path. */
+int phasm_fetch_replay_decision(uint16_t mb_x, uint16_t mb_y,
+                                PhasmStegoMbDecision* out_decision);
+
+/* ---------------------------------------------------------------------
  * phasm_dual_recon_writeback (Phase C.8.2+)
  *
  * Single entry point called by C.8.3-8 per-mode recon hook bodies

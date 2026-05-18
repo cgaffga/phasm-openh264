@@ -2158,6 +2158,29 @@ bool WelsMdFirstIntraMode (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurMb, 
 void WelsMdInterMb (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SSlice* pSlice, SMB* pCurMb, SMbCache* pUnused) {
   SDqLayer* pCurDqLayer             = pEncCtx->pCurDqLayer;
   SMbCache* pMbCache                = &pSlice->sMbCacheInfo;
+
+  /* #533.3 Stage 1 — Pass-2 REPLAY override.
+   *
+   * If REPLAY mode is active and the consumer has a cached decision
+   * for this MB, short-circuit RDO/ME. Stage 1 handles only SKIP
+   * (the common-case fast path in P-frames); other mb_types fall
+   * through to normal mode decision until Stage 2/3 add their
+   * replay branches. WelsMdInterDecidedPskip writes uiMbType + sMv
+   * + recon deterministically from the same neighbour state that
+   * Pass-1 saw, so REPLAY-SKIP is byte-identical to natural Skip. */
+  if (PhasmStegoGetPassMode() == PHASM_PASS_REPLAY) {
+    PhasmStegoMbDecision d;
+    if (phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
+                                     (uint16_t)pCurMb->iMbY, &d)) {
+      if (d.ui_mb_type & MB_TYPE_SKIP) {
+        WelsMdInterDecidedPskip (pEncCtx, pSlice, pCurMb, pMbCache);
+        return;
+      }
+      /* Non-SKIP mb_types: Stage 2+ (P_16x16) and Stage 3+
+       * (partitioned + intra). Fall through for now. */
+    }
+  }
+
   const uint32_t kuiNeighborAvail   = pCurMb->uiNeighborAvail;
   const int32_t kiMbWidth           = pCurDqLayer->iMbWidth;
   const  SMB* top_mb                = pCurMb - kiMbWidth;

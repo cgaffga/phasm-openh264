@@ -333,6 +333,16 @@ void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision) {
   cb(decision, PhasmStegoGetUserData());
 }
 
+int phasm_fetch_replay_decision(uint16_t mb_x, uint16_t mb_y,
+                                PhasmStegoMbDecision* out_decision) {
+  if (out_decision == nullptr) return 0;
+  if (PhasmStegoGetPassMode() != PHASM_PASS_REPLAY) return 0;
+  PhasmStegoReplayMbDecisionFn cb = PhasmStegoGetReplayMbDecision();
+  if (cb == nullptr) return 0;
+  return cb(PhasmStegoGetFrameNum(), mb_x, mb_y, out_decision,
+            PhasmStegoGetUserData());
+}
+
 int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   if (ctx == nullptr || ctx->mv_x_qpel == nullptr || ctx->mv_y_qpel == nullptr) {
     return 0;
