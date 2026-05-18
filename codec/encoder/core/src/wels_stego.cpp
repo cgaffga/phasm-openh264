@@ -48,6 +48,12 @@ static std::atomic<uint64_t> g_phasm_hook_single_fires_total{0};
 static std::atomic<uint64_t> g_phasm_hook_single_bail_level_zero{0};
 static std::atomic<uint64_t> g_phasm_hook_single_applied{0};
 
+/* Phase 4.5.b — wire-only mode gate (definition; full doc on the
+ * extern "C" setter/getter near the end of this file). Lives here
+ * so `phasm_apply_mvd_hooks` (defined below) can read it without a
+ * forward declaration dance. */
+static int g_phasm_use_wire_only_overrides = 0;
+
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
 //
@@ -366,6 +372,10 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   int16_t mv_out[2] = { mv_in[0], mv_in[1] };
   int16_t mvp[2]    = { ctx->mvp_x_qpel, ctx->mvp_y_qpel };
 
+  /* Phase 4.5.b — branch on the wire-only flag. */
+  const int wire_only = g_phasm_use_wire_only_overrides;
+  int wire_only_any_override = 0;
+
   for (int comp = 0; comp < 2; ++comp) {
     int16_t mvd_in = (int16_t)((int32_t)mv_in[comp] - (int32_t)mvp[comp]);
     if (mvd_in == 0) continue;
@@ -376,19 +386,49 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
     pos.domain = (uint8_t)PHASM_DOMAIN_MVD_SIGN;
     int32_t ovr_sign = cb(&pos, orig_sign, user_data);
     if ((ovr_sign == 0 || ovr_sign == 1) && ovr_sign != orig_sign) {
-      mv_out[comp] = apply_mvd_sign_override(mv_in[comp], mvp[comp]);
+      if (wire_only) {
+        /* Populate scratch — emit-side bypass-bin hook will flip
+         * the wire bit. Encoder state stays unchanged. */
+        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SIGN, &pos, ovr_sign);
+        wire_only_any_override = 1;
+      } else {
+        mv_out[comp] = apply_mvd_sign_override(mv_in[comp], mvp[comp]);
+      }
     }
 
-    int16_t cur_mvd = (int16_t)((int32_t)mv_out[comp] - (int32_t)mvp[comp]);
-    int16_t abs_mvd = (cur_mvd < 0) ? (int16_t)-cur_mvd : cur_mvd;
+    /* Suffix LSB path: in mutation mode, MVD magnitude check reads
+     * mv_out (post-sign-override) so a sign-flipped MVD that now
+     * has |MVD|>=9 picks up a suffix override. In wire-only mode,
+     * the wire's prefix-vs-suffix split is decided from the ORIGINAL
+     * MVD magnitude (encoder state unchanged), so the suffix bin
+     * only exists when the original |MVD|>=9. Branch accordingly. */
+    int16_t check_mvd = wire_only ? mvd_in
+                                  : (int16_t)((int32_t)mv_out[comp] - (int32_t)mvp[comp]);
+    int16_t abs_mvd = (check_mvd < 0) ? (int16_t)-check_mvd : check_mvd;
     if (abs_mvd >= 9) {
       int32_t orig_lsb = (abs_mvd - 9) & 1;
       pos.domain = (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB;
       int32_t ovr_lsb = cb(&pos, orig_lsb, user_data);
       if ((ovr_lsb == 0 || ovr_lsb == 1) && ovr_lsb != orig_lsb) {
-        mv_out[comp] = apply_mvd_suffix_lsb(mv_out[comp], mvp[comp], ovr_lsb);
+        if (wire_only) {
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &pos, ovr_lsb);
+          wire_only_any_override = 1;
+        } else {
+          mv_out[comp] = apply_mvd_suffix_lsb(mv_out[comp], mvp[comp], ovr_lsb);
+        }
       }
     }
+  }
+
+  /* Wire-only path: scratch populated, encoder state untouched.
+   * Skip the MV-mutation tail (pskip-collision check is moot — we
+   * didn't change the MV — and sMvList stays in sync with mv_in). */
+  if (wire_only) {
+    if (wire_only_any_override) {
+      phasm_inc_slice_override_count();  // C.9.2 (#450)
+      return 1;
+    }
+    return 0;
   }
 
   const int16_t new_x = mv_out[0];
@@ -473,6 +513,18 @@ struct PhasmBypassOverrides {
 };
 
 static PhasmBypassOverrides g_phasm_bypass_overrides;
+
+/* Phase 4.5.b — wire-only mode gate setters/getter (extern "C"). The
+ * static variable itself is defined at file scope earlier in this TU
+ * so `phasm_apply_mvd_hooks` can read it without a forward declaration
+ * dance. See doc on `g_phasm_use_wire_only_overrides` near the top. */
+void phasm_set_use_wire_only_overrides(int enabled) {
+  g_phasm_use_wire_only_overrides = (enabled != 0) ? 1 : 0;
+}
+
+int phasm_get_use_wire_only_overrides(void) {
+  return g_phasm_use_wire_only_overrides;
+}
 
 /* Internal helper: validate slot indices for the given domain and
  * return a pointer to the slot byte, or nullptr if any index is out

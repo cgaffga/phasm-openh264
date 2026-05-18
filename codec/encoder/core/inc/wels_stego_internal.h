@@ -404,6 +404,26 @@ void phasm_set_bypass_override(uint8_t domain,
                                 const PhasmStegoPos* pos,
                                 int override_bin);
 
+/* ---------------------------------------------------------------------
+ * Phase 4.5.b (#538) — wire-only mode gate.
+ *
+ * When OFF (default), the mutating-hook helpers keep their pre-4.5
+ * behaviour: invoke the Rust callback, mutate *level / MV in place.
+ * When ON, those helpers route override decisions to the scratch
+ * table via `phasm_set_bypass_override` and DO NOT mutate encoder
+ * state — Pass-2's pDecPic stays byte-identical to Pass-1's, and the
+ * stego override only manifests on the wire via the Phase 4.2-4.4
+ * bypass-bin emit hooks.
+ *
+ * Phase 4.5.b ships the gate + the MVD-hook (`phasm_apply_mvd_hooks`)
+ * branch only. Coeff hooks migrate in 4.5.c+. Default stays OFF so
+ * the 19 lib tests that register `enc_pre_emit` callbacks and verify
+ * mutated-state behaviour stay green. Phase 4.6 wires a forged-flip
+ * test that toggles ON; Phase 5 (#539) flips the default once
+ * C.8.x dual-recon machinery is gone. */
+void phasm_set_use_wire_only_overrides(int enabled);
+int  phasm_get_use_wire_only_overrides(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
