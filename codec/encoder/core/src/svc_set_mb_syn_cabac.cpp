@@ -51,6 +51,21 @@ static const uint16_t uiLastCoeffFlagOffset[5] = {0, 15, 29, 44, 47};
 static const uint16_t uiCoeffAbsLevelMinus1Offset[5] = {0, 10, 20, 30, 39};
 static const uint16_t uiCodecBlockFlagOffset[5] = {0, 4, 8, 12, 16};
 
+/* #538 Phase 4.5.d.1b — 4x4 zigzag scan table for emit-side
+ * scratch-key conversion. Derived from WelsScan4x4DcAc_c in
+ * encode_mb_aux.cpp: pLevel[scan_pos] = pDct[g_phasm_zigzag_scan[scan_pos]].
+ * Used in WelsWriteBlockResidualCabac to map scan position → raster
+ * sub-block index for DC-type blocks (LUMA_DC, CHROMA_DC), where the
+ * "logical sub-block" the DC entry represents IS the raster sub-block
+ * idx in the MB. Populate-side HOOK-A keys by raster sub-block idx;
+ * this table lets emit produce the same key. */
+static const uint8_t g_phasm_zigzag_scan_4x4[16] = {
+  0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15
+};
+
+/* 2x2 chroma DC zigzag — identity (4 entries in raster order). */
+static const uint8_t g_phasm_zigzag_scan_2x2[4] = { 0, 1, 2, 3 };
+
 /* #538 Phase 4.4 — UEG bypass with phasm LSB override.
  *
  * Same emit sequence as WelsCabacEncodeUeBypass (set_mb_syn_cabac.cpp)
@@ -627,17 +642,35 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
            * UEG0 suffix for |coeff| >= 15. The LSB of the suffix
            * value (uiVal = |coeff| - 15) becomes the |coeff| LSB
            * on the wire; phasm's CoeffSuffixLsb domain targets it.
-           * Phase 4.5.d.1 — coeff_idx is now the canonical scan
-           * position (iLevelScanPos[iNonZeroIdx]) rather than the
-           * compressed iNonZeroIdx, ready for populate-side
-           * raster→scan migrations in 4.5.d.2+. */
+           * Phase 4.5.d.1/d.1b — per-block_cat canonical key:
+           *   DC types : sub_block = g_zigzag[scan_pos] (the raster
+           *              sub-block idx the DC entry represents),
+           *              coeff_idx = 0.
+           *   AC types : sub_block = iIdx (block idx in MB),
+           *              coeff_idx = scan_pos.
+           * This matches populate-side hook semantics in
+           * svc_encode_mb.cpp once 4.5.d.2-d.6 migrate the AC
+           * populate sites raster→scan. */
+          const int32_t phasm_scan_pos = iLevelScanPos[iNonZeroIdx];
+          uint8_t phasm_sub_block_csl;
+          uint8_t phasm_coeff_idx_csl;
+          if (eCtxBlockCat == LUMA_DC) {
+            phasm_sub_block_csl = g_phasm_zigzag_scan_4x4[phasm_scan_pos];
+            phasm_coeff_idx_csl = 0;
+          } else if (eCtxBlockCat == CHROMA_DC) {
+            phasm_sub_block_csl = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
+            phasm_coeff_idx_csl = 0;
+          } else {
+            phasm_sub_block_csl = (uint8_t)iIdx;
+            phasm_coeff_idx_csl = (uint8_t)phasm_scan_pos;
+          }
           PhasmStegoPos phasm_pos_csl;
           phasm_pos_csl.frame_num     = PhasmStegoGetFrameNum();
           phasm_pos_csl.mb_x          = (uint16_t)pCurMb->iMbX;
           phasm_pos_csl.mb_y          = (uint16_t)pCurMb->iMbY;
           phasm_pos_csl.partition_idx = 0;
-          phasm_pos_csl.sub_block     = (uint8_t)iIdx;
-          phasm_pos_csl.coeff_idx     = (uint8_t)iLevelScanPos[iNonZeroIdx];
+          phasm_pos_csl.sub_block     = phasm_sub_block_csl;
+          phasm_pos_csl.coeff_idx     = phasm_coeff_idx_csl;
           phasm_pos_csl.block_cat     = (uint8_t)eCtxBlockCat;
           phasm_pos_csl.ref_idx       = 0xff;
           phasm_pos_csl.mv_component  = 0xff;
@@ -656,26 +689,31 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
       }
       /* #538 Phase 4.2 — wire-only CoeffSign override hook.
        *
-       * Phase 4.5.d.1 — coeff_idx is now the canonical scan position
-       * (`iLevelScanPos[iNonZeroIdx]`) rather than the compressed
-       * `iNonZeroIdx`. This is the per-(block_cat) scan position the
-       * H.264 spec § 9.3.3.1.1 sig-coeff scan iterates over (matches
-       * what `pBlock[i]` indexed at the significant-coeff scan).
-       *
-       * Populate-side hook sites in svc_encode_mb.cpp still pass
-       * RASTER coeff_idx until 4.5.d.2+ migrate them to scan position
-       * via inverse-zigzag (so overrides land in the slot the emit
-       * reads from). Until that lands, coeff overrides under flag ON
-       * silently no-op for non-DC sites (scratch slot at raster never
-       * read by emit at scan). Safe — never wrong, just inactive. */
+       * Phase 4.5.d.1/d.1b — same per-block_cat canonical key
+       * derivation as the CoeffSuffixLsb site above:
+       *   DC types : sub_block = g_zigzag[scan_pos], coeff_idx = 0.
+       *   AC types : sub_block = iIdx, coeff_idx = scan_pos. */
       {
+        const int32_t phasm_scan_pos = iLevelScanPos[iNonZeroIdx];
+        uint8_t phasm_sub_block;
+        uint8_t phasm_coeff_idx;
+        if (eCtxBlockCat == LUMA_DC) {
+          phasm_sub_block = g_phasm_zigzag_scan_4x4[phasm_scan_pos];
+          phasm_coeff_idx = 0;
+        } else if (eCtxBlockCat == CHROMA_DC) {
+          phasm_sub_block = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
+          phasm_coeff_idx = 0;
+        } else {
+          phasm_sub_block = (uint8_t)iIdx;
+          phasm_coeff_idx = (uint8_t)phasm_scan_pos;
+        }
         PhasmStegoPos phasm_pos;
         phasm_pos.frame_num     = PhasmStegoGetFrameNum();
         phasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
         phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
         phasm_pos.partition_idx = 0;
-        phasm_pos.sub_block     = (uint8_t)iIdx;
-        phasm_pos.coeff_idx     = (uint8_t)iLevelScanPos[iNonZeroIdx];
+        phasm_pos.sub_block     = phasm_sub_block;
+        phasm_pos.coeff_idx     = phasm_coeff_idx;
         phasm_pos.block_cat     = (uint8_t)eCtxBlockCat;
         phasm_pos.ref_idx       = 0xff;
         phasm_pos.mv_component  = 0xff;
