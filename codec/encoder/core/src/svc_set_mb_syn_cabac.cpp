@@ -51,6 +51,56 @@ static const uint16_t uiLastCoeffFlagOffset[5] = {0, 15, 29, 44, 47};
 static const uint16_t uiCoeffAbsLevelMinus1Offset[5] = {0, 10, 20, 30, 39};
 static const uint16_t uiCodecBlockFlagOffset[5] = {0, 4, 8, 12, 16};
 
+/* #538 Phase 4.4 — UEG bypass with phasm LSB override.
+ *
+ * Same emit sequence as WelsCabacEncodeUeBypass (set_mb_syn_cabac.cpp)
+ * but the LAST bin emitted (the LSB of the suffix value, the k==0
+ * iteration of the inner loop) routes through the wire-only override
+ * hook. Used at the 2 stego-relevant UEG sites:
+ *
+ *   - MVD long-form suffix (UEG3): MvdSuffixLsb domain
+ *   - Coeff level long-form suffix (UEG0): CoeffSuffixLsb domain
+ *
+ * Stub-only at this point: `phasm_apply_bypass_bin_override` returns
+ * `orig_bin` unconditionally, so this is byte-identical to
+ * WelsCabacEncodeUeBypass. Phase 4.5 wires the scratch backing.
+ *
+ * Note: when `uiVal == 0` (the iSufS < (1<<k) branch fires immediately
+ * with k == iExpBits), the suffix emit collapses to a single 0 bin
+ * followed by `iExpBits` zero bins; the k==0 iteration still emits
+ * the LSB through the override hook. When `iExpBits == 0` the do-while
+ * exits without entering the inner `while (k--)`, so no override fires
+ * for that emit — see the dispatch comment at the call site.
+ */
+static inline void WelsCabacEncodeUeBypassWithPhasmLsbOverride (
+    SCabacCtx* pCbCtx, int32_t iExpBits, uint32_t uiVal,
+    uint8_t phasm_domain, const PhasmStegoPos* phasm_pos) {
+  int32_t iSufS = (int32_t)uiVal;
+  int32_t iStopLoop = 0;
+  int32_t k = iExpBits;
+  do {
+    if (iSufS >= (1 << k)) {
+      WelsCabacEncodeBypassOne (pCbCtx, 1);
+      iSufS = iSufS - (1 << k);
+      k++;
+    } else {
+      WelsCabacEncodeBypassOne (pCbCtx, 0);
+      while (k--) {
+        const int32_t orig_bin = (iSufS >> k) & 1;
+        if (k == 0) {
+          /* LSB iteration — route through phasm hook. */
+          const int phasm_bin = phasm_apply_bypass_bin_override (
+              phasm_domain, phasm_pos, (int)orig_bin);
+          WelsCabacEncodeBypassOne (pCbCtx, phasm_bin);
+        } else {
+          WelsCabacEncodeBypassOne (pCbCtx, orig_bin);
+        }
+      }
+      iStopLoop = 1;
+    }
+  } while (!iStopLoop);
+}
+
 
 static void WelsCabacMbType (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbCache, int32_t iMbWidth,
                              EWelsSliceType eSliceType) {
@@ -359,7 +409,17 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
         if (i < 3)
           iCtxInc++;
       }
-      WelsCabacEncodeUeBypass (pCabacCtx, 3, iAbsMvd - 9);
+      /* #538 Phase 4.4 — MvdSuffixLsb wire-only override.
+       *
+       * UEG3 suffix for long-form |MVD|>=9. The LSB of the suffix
+       * value (uiVal = iAbsMvd - 9) becomes the |MVD| LSB on the
+       * wire, which is the cover bit phasm's MvdSuffixLsb domain
+       * targets. Stub returns orig_bin -> byte-identical. */
+      PhasmStegoPos phasm_pos_msl = phasm_pos;
+      phasm_pos_msl.domain = (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB;
+      WelsCabacEncodeUeBypassWithPhasmLsbOverride (
+          pCabacCtx, 3, (uint32_t)(iAbsMvd - 9),
+          (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &phasm_pos_msl);
       const int phasm_bin = phasm_apply_bypass_bin_override (
           (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign);
       WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
@@ -543,8 +603,32 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
           WelsCabacEncodeDecision (pCabacCtx, iCtx, 1);
         if (WELS_ABS (iLevel[iNonZeroIdx]) < 15)
           WelsCabacEncodeDecision (pCabacCtx, iCtx, 0);
-        else
-          WelsCabacEncodeUeBypass (pCabacCtx, 0, WELS_ABS (iLevel[iNonZeroIdx]) - 15);
+        else {
+          /* #538 Phase 4.4 — CoeffSuffixLsb wire-only override.
+           *
+           * UEG0 suffix for |coeff| >= 15. The LSB of the suffix
+           * value (uiVal = |coeff| - 15) becomes the |coeff| LSB
+           * on the wire; phasm's CoeffSuffixLsb domain targets it.
+           * Same indexing caveat as the CoeffSign block below
+           * (iIdx + iNonZeroIdx vs populate-side coeff_idx_scanned)
+           * — harmless until Phase 4.5 reconciles. */
+          PhasmStegoPos phasm_pos_csl;
+          phasm_pos_csl.frame_num     = PhasmStegoGetFrameNum();
+          phasm_pos_csl.mb_x          = (uint16_t)pCurMb->iMbX;
+          phasm_pos_csl.mb_y          = (uint16_t)pCurMb->iMbY;
+          phasm_pos_csl.partition_idx = 0;
+          phasm_pos_csl.sub_block     = (uint8_t)iIdx;
+          phasm_pos_csl.coeff_idx     = (uint8_t)iNonZeroIdx;
+          phasm_pos_csl.block_cat     = (uint8_t)eCtxBlockCat;
+          phasm_pos_csl.ref_idx       = 0xff;
+          phasm_pos_csl.mv_component  = 0xff;
+          phasm_pos_csl.domain        = (uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB;
+          phasm_pos_csl._reserved     = 0;
+          WelsCabacEncodeUeBypassWithPhasmLsbOverride (
+              pCabacCtx, 0,
+              (uint32_t) (WELS_ABS (iLevel[iNonZeroIdx]) - 15),
+              (uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &phasm_pos_csl);
+        }
         iCtx1 = iCtxLevel;
       } else {
         iCtx = WELS_MIN (iCtxLevel + 4, iCtx1);
