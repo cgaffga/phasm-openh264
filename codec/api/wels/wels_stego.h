@@ -327,12 +327,16 @@ typedef struct PhasmStegoMbDecision {
   uint16_t mb_x;                   /* macroblock column (MB units) */
   uint16_t mb_y;                   /* macroblock row */
 
-  /* === Top-level mb_type === */
+  /* === Top-level mb_type ===
+   * `ui_mb_type` holds the OH264-internal `Mb_Type` bitfield value
+   * verbatim (lower 16 bits). It can be set directly on
+   * `pCurMb->uiMbType` during replay. uint16_t covers all baseline +
+   * Main-profile flags through MB_TYPE_P1L1 (0x8000); the upper bits
+   * of the underlying uint32_t are not used by phasm. */
+  uint16_t ui_mb_type;             /* OH264 MB_TYPE_* bitfield value */
   uint8_t  mb_type;                /* PHASM_MB_TYPE_* classification */
-  uint8_t  ui_mb_type;             /* OH264-internal MB_TYPE_* raw value */
-  uint8_t  sub_mb_type[4];         /* P_8x8 / B_8x8 per-8x8 sub-mode */
   int8_t   qp_delta;               /* signed; 0 in CQP mode */
-  uint8_t  _pad0;                  /* 4-byte align */
+  uint8_t  sub_mb_type[4];         /* P_8x8 / B_8x8 per-8x8 sub-mode */
 
   /* === Motion (per 4x4 sub-block × 2 reference lists) ===
    * mv_x/y[4x4_scan_idx][list]. For non-B-slice modes, list-1 entries
@@ -436,7 +440,7 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
  * here means someone forgot to bump the SHA pin.
  * ------------------------------------------------------------------ */
 
-#define PHASM_STEGO_ABI_VERSION 0x010300u
+#define PHASM_STEGO_ABI_VERSION 0x010301u
 uint32_t WelsStegoAbiVersion(void);
 
 /* ---------------------------------------------------------------------

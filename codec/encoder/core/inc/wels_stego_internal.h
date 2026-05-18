@@ -172,6 +172,21 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
                         uint32_t internal_mb_type, uint8_t cbp);
 
 /* ---------------------------------------------------------------------
+ * phasm_emit_mb_decision (#533.2 Pass-2 replay)
+ *
+ * Fire the registered `capture_mb_decision` callback (if any) with a
+ * caller-built per-MB decision record. Caller in svc_encode_slice.cpp
+ * builds the struct from `pCurMb` at the same MB boundary where
+ * md_cost fires (after WelsMdIntraMb / pfInterMd finalizes mb_type +
+ * partition + MVs + intra pred modes, before residual emit).
+ *
+ * No-op unless `WelsStegoSetPassMode(PHASM_PASS_CAPTURE)` is in
+ * effect and a `capture_mb_decision` callback is registered. The
+ * hot path on disabled pass-mode is two function-pointer reads.
+ * ------------------------------------------------------------------ */
+void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision);
+
+/* ---------------------------------------------------------------------
  * phasm_dual_recon_writeback (Phase C.8.2+)
  *
  * Single entry point called by C.8.3-8 per-mode recon hook bodies

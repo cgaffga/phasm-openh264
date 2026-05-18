@@ -325,6 +325,14 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
   cb(&cost, PhasmStegoGetUserData());
 }
 
+void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision) {
+  if (decision == nullptr) return;
+  if (PhasmStegoGetPassMode() != PHASM_PASS_CAPTURE) return;
+  PhasmStegoCaptureMbDecisionFn cb = PhasmStegoGetCaptureMbDecision();
+  if (cb == nullptr) return;
+  cb(decision, PhasmStegoGetUserData());
+}
+
 int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   if (ctx == nullptr || ctx->mv_x_qpel == nullptr || ctx->mv_y_qpel == nullptr) {
     return 0;
