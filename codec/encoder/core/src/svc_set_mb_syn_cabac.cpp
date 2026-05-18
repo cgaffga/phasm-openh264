@@ -66,6 +66,41 @@ static const uint8_t g_phasm_zigzag_scan_4x4[16] = {
 /* 2x2 chroma DC zigzag — identity (4 entries in raster order). */
 static const uint8_t g_phasm_zigzag_scan_2x2[4] = { 0, 1, 2, 3 };
 
+/* #538 Phase 4.6 — convert OpenH264's "cache offset" iIdx (the value
+ * stored at g_kuiCache48CountScan4Idx[i] for the i-th 4x4 block in
+ * scan order over the MB) back to a raster sub-block index. The
+ * cache is a 6x8 grid (LDC layout); luma 4x4 blocks live at rows 1..4
+ * cols 1..4, Cb at rows 1..2 cols 6..7, Cr at rows 4..5 cols 6..7.
+ *
+ * Populate-side hooks (HOOK-B/E/F in svc_encode_mb.cpp) pass raster
+ * sub-block indices 0..15 (luma) or 0..3 within plane (chroma) — see
+ * `apply_coeff_hooks_to_level` documentation. The wire-only scratch
+ * is keyed by raster sub-block. Emit's `iIdx` is a cache offset, not
+ * raster, so this conversion is needed for populate↔emit alignment.
+ *
+ * For CHROMA_AC the within-plane raster is 0..3 for BOTH Cb and Cr,
+ * so the scratch slot doesn't currently disambiguate plane —
+ * partition_idx in PhasmStegoPos identifies the plane on the
+ * populate side but isn't part of the scratch key. That's a Cb↔Cr
+ * collision bug (TODO #538.4.7); luma is unaffected. */
+static inline uint8_t phasm_cache_offset_to_raster_subblock(int32_t iIdx,
+                                                             ECtxBlockCat eCtxBlockCat) {
+  const int32_t row = iIdx / 8;
+  const int32_t col = iIdx % 8;
+  if (eCtxBlockCat == LUMA_AC || eCtxBlockCat == LUMA_4x4) {
+    /* Luma 4x4 blocks: cache rows 1..4, cols 1..4 → raster rows 0..3, cols 0..3. */
+    return (uint8_t)((row - 1) * 4 + (col - 1));
+  }
+  if (eCtxBlockCat == CHROMA_AC) {
+    /* Chroma 4x4 blocks: Cb rows 1..2 / Cr rows 4..5, cols 6..7. */
+    const int32_t raster_r = (row >= 4) ? (row - 4) : (row - 1);
+    const int32_t raster_c = col - 6;
+    return (uint8_t)(raster_r * 2 + raster_c);
+  }
+  /* DC types are not routed through this helper. */
+  return (uint8_t)iIdx;
+}
+
 /* #538 Phase 4.4 — UEG bypass with phasm LSB override.
  *
  * Same emit sequence as WelsCabacEncodeUeBypass (set_mb_syn_cabac.cpp)
@@ -661,7 +696,9 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
             phasm_sub_block_csl = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
             phasm_coeff_idx_csl = 0;
           } else {
-            phasm_sub_block_csl = (uint8_t)iIdx;
+            /* #538 Phase 4.6 — iIdx is a CACHE OFFSET (e.g. 9, 10, 17,
+             * 18, ...) not a raster sub-block index. Convert it. */
+            phasm_sub_block_csl = phasm_cache_offset_to_raster_subblock(iIdx, eCtxBlockCat);
             phasm_coeff_idx_csl = (uint8_t)phasm_scan_pos;
           }
           PhasmStegoPos phasm_pos_csl;
@@ -704,7 +741,9 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
           phasm_sub_block = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
           phasm_coeff_idx = 0;
         } else {
-          phasm_sub_block = (uint8_t)iIdx;
+          /* #538 Phase 4.6 — iIdx is a CACHE OFFSET (e.g. 9, 10, 17,
+           * 18, ...) not a raster sub-block index. Convert it. */
+          phasm_sub_block = phasm_cache_offset_to_raster_subblock(iIdx, eCtxBlockCat);
           phasm_coeff_idx = (uint8_t)phasm_scan_pos;
         }
         PhasmStegoPos phasm_pos;
