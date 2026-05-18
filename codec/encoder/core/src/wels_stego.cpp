@@ -54,6 +54,45 @@ static std::atomic<uint64_t> g_phasm_hook_single_applied{0};
  * forward declaration dance. */
 static int g_phasm_use_wire_only_overrides = 0;
 
+/* Phase 4.5.e — automatic per-MB scratch reset.
+ *
+ * Scratch slots are keyed by (block_cat, sub_block, coeff_idx) for
+ * coeff domains and (partition_idx, mv_component) for MVD domains.
+ * NEITHER scheme includes mb_x/mb_y, so without a per-MB reset,
+ * stale slots from the previous MB would leak into the current MB
+ * at positions the current MB doesn't itself populate.
+ *
+ * Approach: at the start of every populate-side hook entry
+ * (apply_coeff_hooks_to_level + phasm_apply_mvd_hooks), check
+ * whether (frame_num, mb_x, mb_y) differs from the last seen. If
+ * yes, clear scratch via `phasm_reset_bypass_overrides`. First
+ * populate-hook fire of each MB triggers a reset; subsequent fires
+ * within the same MB are no-ops.
+ *
+ * Gated on `g_phasm_use_wire_only_overrides` so flag OFF (default)
+ * path stays cycle-equivalent to pre-4.5.e.
+ *
+ * Sentinel initial values (`0xFFFFFFFF` / `0xFFFF`) ensure the very
+ * first populate-hook fire of every encoder lifetime triggers a
+ * reset — startup state always starts clean. */
+static uint32_t g_phasm_last_mb_frame_num = 0xFFFFFFFFu;
+static uint16_t g_phasm_last_mb_x         = 0xFFFFu;
+static uint16_t g_phasm_last_mb_y         = 0xFFFFu;
+
+static inline void phasm_maybe_reset_for_mb(uint32_t frame_num,
+                                             uint16_t mb_x,
+                                             uint16_t mb_y) {
+  if (!g_phasm_use_wire_only_overrides) return;
+  if (frame_num != g_phasm_last_mb_frame_num ||
+      mb_x      != g_phasm_last_mb_x ||
+      mb_y      != g_phasm_last_mb_y) {
+    phasm_reset_bypass_overrides();
+    g_phasm_last_mb_frame_num = frame_num;
+    g_phasm_last_mb_x         = mb_x;
+    g_phasm_last_mb_y         = mb_y;
+  }
+}
+
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
 //
@@ -152,6 +191,10 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   pos->_reserved    = 0;
 
   const int wire_only = g_phasm_use_wire_only_overrides;
+  /* Phase 4.5.e — clear stale scratch from previous MB before this
+   * MB's first populate-hook fires. No-op on subsequent fires
+   * within the same MB; pure no-op under flag OFF. */
+  phasm_maybe_reset_for_mb(pos->frame_num, pos->mb_x, pos->mb_y);
 
   int32_t orig_sign = (level < 0) ? 1 : 0;
   int32_t override_sign = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SIGN, orig_sign);
@@ -409,6 +452,10 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   PhasmStegoEncPreEmitFn cb = PhasmStegoGetEncPreEmit();
   if (cb == nullptr) return 0;
   void* user_data = PhasmStegoGetUserData();
+
+  /* Phase 4.5.e — clear stale scratch from previous MB. Pure no-op
+   * under flag OFF. */
+  phasm_maybe_reset_for_mb(ctx->frame_num, ctx->mb_x, ctx->mb_y);
 
   PhasmStegoPos pos;
   pos.frame_num     = ctx->frame_num;
