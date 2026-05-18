@@ -820,6 +820,33 @@ void phasm_reset_bypass_overrides(void) {
   g_phasm_diag_reset_calls.fetch_add(1, std::memory_order_relaxed);
 }
 
+/* #548 v1.0 BLOCKER fix (2026-05-18) — Reset ALL libencoder-private
+ * phasm globals at start of every new encode session. Cross-call
+ * state-leak: a second sequential `encode_yuv_with_pre_framed_bits_4domain`
+ * call produced 541 ChromaAc CS Sign diffs (vs 0 on the first call,
+ * same YUV + same params) because some phasm-fork global was holding
+ * state across the encoder-instance teardown.
+ *
+ * Resets:
+ *   - g_phasm_bypass_overrides    (scratch table)
+ *   - g_phasm_last_mb_*           (sentinel state for scratch reset)
+ *   - g_phasm_use_wire_only_overrides (defensive; orchestrator
+ *                                     already resets after Pass 2 but
+ *                                     belt-and-braces)
+ *
+ * Caller (the Rust orchestrator) is responsible for resetting the
+ * libcommon-side state (`phasm_reset_dirty_flags()`,
+ * `phasm_clear_mv_clean_mc_stash()`, etc.) — those have their own
+ * extern "C" entry points in wels_stego_common.cpp. */
+void phasm_reset_encoder_session_state(void) {
+  std::memset(&g_phasm_bypass_overrides, 0, sizeof(g_phasm_bypass_overrides));
+  g_phasm_last_mb_frame_num = 0xFFFFFFFFu;
+  g_phasm_last_mb_x         = 0xFFFFu;
+  g_phasm_last_mb_y         = 0xFFFFu;
+  g_phasm_use_wire_only_overrides = 0;
+  g_phasm_diag_reset_calls.fetch_add(1, std::memory_order_relaxed);
+}
+
 /* Populate a single slot. Caller passes the OVERRIDE BIN (0 or 1);
  * this function stores it as 1/2 in the scratch byte (0 reserved for
  * "no override"). Out-of-range domains, positions, or override bins

@@ -547,6 +547,15 @@ int phasm_apply_bypass_bin_override (uint8_t domain,
 void phasm_set_use_wire_only_overrides (int enabled);
 int  phasm_get_use_wire_only_overrides (void);
 
+/* #548 v1.0 BLOCKER fix (2026-05-18) — Reset libencoder-side phasm
+ * statics at start of a new encode session. Call from the Rust
+ * orchestrator before each `encode_yuv_with_pre_framed_bits_4domain`
+ * invocation so consecutive calls don't share scratch / last-MB /
+ * wire-only flag state. The libcommon-side state has separate entry
+ * points (`phasm_reset_dirty_flags`, etc.) — call those too if you
+ * need a full fork-state wipe. */
+void phasm_reset_encoder_session_state (void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
