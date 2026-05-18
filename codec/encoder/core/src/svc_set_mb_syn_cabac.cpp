@@ -557,6 +557,22 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
   int32_t iCtx = WelsGetMbCtxCabac (pMbCache, pCurMb, iMbWidth, eCtxBlockCat, iIdx);
   if (iNonZeroCount) {
     int16_t iLevel[16];
+    /* #538 Phase 4.5.d.1 — parallel scan-position tracking for the
+     * compressed iLevel[] array. iLevel[k] = pBlock[scan_pos_k]; the
+     * scratch-table emit hooks below need scan_pos_k (not k) as the
+     * canonical coeff_idx key so populate-side hooks can target it
+     * via inverse-zigzag in 4.5.d.2+. Per-block_cat semantics:
+     *   LUMA_DC   : scan_pos = raster idx in 4x4 DC vector (no scan
+     *               applied by the encoder for DC pre-Hadamard? — the
+     *               scan_position here is the position WelsWriteBlockResidualCabac
+     *               iterates over pBlock[i]; that's where the canonical
+     *               key lives regardless of upstream raster/scan ops).
+     *   LUMA_AC   : scan_pos = 1..15 (DC skipped, iStartIdx=1)
+     *   LUMA_4x4  : scan_pos = 0..15
+     *   CHROMA_DC : scan_pos = 0..3 (2x2 DC vector)
+     *   CHROMA_AC : scan_pos = 1..15
+     */
+    int32_t iLevelScanPos[16];
     const int32_t iCtxSig = 105 + uiSignificantCoeffFlagOffset[eCtxBlockCat];
     const int32_t iCtxLast = 166 + uiLastCoeffFlagOffset[eCtxBlockCat];
     const int32_t iCtxLevel = 227 + uiCoeffAbsLevelMinus1Offset[eCtxBlockCat];
@@ -566,7 +582,8 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
     WelsCabacEncodeDecision (pCabacCtx, iCtx, 1);
     while (1) {
       if (pBlock[i]) {
-        iLevel[iNonZeroIdx] = pBlock[i];
+        iLevel[iNonZeroIdx]        = pBlock[i];
+        iLevelScanPos[iNonZeroIdx] = i;
 
         iNonZeroIdx++;
         WelsCabacEncodeDecision (pCabacCtx, iCtxSig + i, 1);
@@ -580,7 +597,8 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
         WelsCabacEncodeDecision (pCabacCtx, iCtxSig + i, 0);
       i++;
       if (i == iEndIdx) {
-        iLevel[iNonZeroIdx] = pBlock[i];
+        iLevel[iNonZeroIdx]        = pBlock[i];
+        iLevelScanPos[iNonZeroIdx] = i;
         iNonZeroIdx++;
         break;
       }
@@ -609,16 +627,17 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
            * UEG0 suffix for |coeff| >= 15. The LSB of the suffix
            * value (uiVal = |coeff| - 15) becomes the |coeff| LSB
            * on the wire; phasm's CoeffSuffixLsb domain targets it.
-           * Same indexing caveat as the CoeffSign block below
-           * (iIdx + iNonZeroIdx vs populate-side coeff_idx_scanned)
-           * — harmless until Phase 4.5 reconciles. */
+           * Phase 4.5.d.1 — coeff_idx is now the canonical scan
+           * position (iLevelScanPos[iNonZeroIdx]) rather than the
+           * compressed iNonZeroIdx, ready for populate-side
+           * raster→scan migrations in 4.5.d.2+. */
           PhasmStegoPos phasm_pos_csl;
           phasm_pos_csl.frame_num     = PhasmStegoGetFrameNum();
           phasm_pos_csl.mb_x          = (uint16_t)pCurMb->iMbX;
           phasm_pos_csl.mb_y          = (uint16_t)pCurMb->iMbY;
           phasm_pos_csl.partition_idx = 0;
           phasm_pos_csl.sub_block     = (uint8_t)iIdx;
-          phasm_pos_csl.coeff_idx     = (uint8_t)iNonZeroIdx;
+          phasm_pos_csl.coeff_idx     = (uint8_t)iLevelScanPos[iNonZeroIdx];
           phasm_pos_csl.block_cat     = (uint8_t)eCtxBlockCat;
           phasm_pos_csl.ref_idx       = 0xff;
           phasm_pos_csl.mv_component  = 0xff;
@@ -637,19 +656,18 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
       }
       /* #538 Phase 4.2 — wire-only CoeffSign override hook.
        *
-       * Stub-only at this point (`phasm_apply_bypass_bin_override`
-       * returns `orig_bin` unconditionally), so this is byte-identical
-       * to the previous unconditional `WelsCabacEncodeBypassOne`. Phase
-       * 4.5 wires the scratch-table backing that lets this call return
-       * an override.
+       * Phase 4.5.d.1 — coeff_idx is now the canonical scan position
+       * (`iLevelScanPos[iNonZeroIdx]`) rather than the compressed
+       * `iNonZeroIdx`. This is the per-(block_cat) scan position the
+       * H.264 spec § 9.3.3.1.1 sig-coeff scan iterates over (matches
+       * what `pBlock[i]` indexed at the significant-coeff scan).
        *
-       * Indexing caveat (TODO Phase 4.5): pos.sub_block + pos.coeff_idx
-       * here use the CABAC-emit-time iIdx + iNonZeroIdx, which is NOT
-       * the same scheme the populate-side mutation hooks use (those
-       * pass coeff_idx_scanned = AC scan position). The scratch table
-       * design in 4.5 must reconcile these — either map at the populate
-       * site or canonicalise via a PositionKey. Until then the
-       * mismatch is harmless because the stub doesn't read pos. */
+       * Populate-side hook sites in svc_encode_mb.cpp still pass
+       * RASTER coeff_idx until 4.5.d.2+ migrate them to scan position
+       * via inverse-zigzag (so overrides land in the slot the emit
+       * reads from). Until that lands, coeff overrides under flag ON
+       * silently no-op for non-DC sites (scratch slot at raster never
+       * read by emit at scan). Safe — never wrong, just inactive. */
       {
         PhasmStegoPos phasm_pos;
         phasm_pos.frame_num     = PhasmStegoGetFrameNum();
@@ -657,7 +675,7 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
         phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
         phasm_pos.partition_idx = 0;
         phasm_pos.sub_block     = (uint8_t)iIdx;
-        phasm_pos.coeff_idx     = (uint8_t)iNonZeroIdx;
+        phasm_pos.coeff_idx     = (uint8_t)iLevelScanPos[iNonZeroIdx];
         phasm_pos.block_cat     = (uint8_t)eCtxBlockCat;
         phasm_pos.ref_idx       = 0xff;
         phasm_pos.mv_component  = 0xff;
