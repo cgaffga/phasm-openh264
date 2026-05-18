@@ -71,7 +71,7 @@ PhasmStegoEncPreEmitFn         PhasmStegoGetEncPreEmit(void);
 PhasmStegoDecPostReadFn        PhasmStegoGetDecPostRead(void);
 PhasmStegoMdCostFn             PhasmStegoGetMdCostCapture(void);
 PhasmStegoDualReconFn          PhasmStegoGetDualReconObserve(void);
-/* ABI 1.3.0+ accessors (Pass-2 replay architecture, Option A). */
+/* Pass-2 replay architecture (Option A) accessors. */
 PhasmStegoCaptureMbDecisionFn  PhasmStegoGetCaptureMbDecision(void);
 PhasmStegoReplayMbDecisionFn   PhasmStegoGetReplayMbDecision(void);
 PhasmStegoPassMode             PhasmStegoGetPassMode(void);

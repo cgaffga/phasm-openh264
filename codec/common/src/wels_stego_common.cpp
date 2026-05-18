@@ -27,16 +27,16 @@
 namespace {
 
 // Process-global callback state. NULL pointers = hook disabled.
-// ABI 1.3.0 grew the struct with capture_mb_decision + replay_mb_decision.
-PhasmStegoCallbacks g_phasm_callbacks = { 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+PhasmStegoCallbacks g_phasm_callbacks = {};
 void*               g_phasm_user_data = nullptr;
 
 // Per-frame state. Caller sets via WelsStegoSetFrameNum at the start
 // of each frame.
 uint32_t            g_phasm_frame_num = 0;
 
-// Pass mode (ABI 1.3.0+). Default: PASSTHROUGH = no capture/replay,
-// pre-1.3.0 behaviour. Set per-pass by caller via WelsStegoSetPassMode.
+// Pass mode. PASSTHROUGH = no capture/replay; encoder runs normally.
+// CAPTURE = Pass-1, capture callback fires per MB. REPLAY = Pass-2,
+// replay callback supplies cached decisions, encoder skips RDO/ME.
 PhasmStegoPassMode  g_phasm_pass_mode = PHASM_PASS_PASSTHROUGH;
 
 }  // namespace
@@ -50,49 +50,23 @@ extern "C" {
 int WelsRegisterPhasmStegoCallbacks(const PhasmStegoCallbacks* callbacks,
                                     void* user_data) {
   if (callbacks == nullptr) {
-    g_phasm_callbacks.struct_size         = 0;
-    g_phasm_callbacks.enc_pre_emit        = nullptr;
-    g_phasm_callbacks.dec_post_read       = nullptr;
-    g_phasm_callbacks.md_cost_capture     = nullptr;
-    g_phasm_callbacks.dual_recon_observe  = nullptr;
-    g_phasm_callbacks.capture_mb_decision = nullptr;
-    g_phasm_callbacks.replay_mb_decision  = nullptr;
-    g_phasm_user_data                     = nullptr;
-    g_phasm_pass_mode                     = PHASM_PASS_PASSTHROUGH;
+    g_phasm_callbacks   = PhasmStegoCallbacks{};
+    g_phasm_user_data   = nullptr;
+    g_phasm_pass_mode   = PHASM_PASS_PASSTHROUGH;
     return 0;
   }
 
-  // ABI version-tolerant registration. Caller's `struct_size` indicates
-  // which version they compiled against. We copy only the fields up to
-  // their struct_size; anything beyond (newer fields they don't know
-  // about) is zero. A caller from before 1.3.0 (smaller struct) gets
-  // capture/replay nullptr, behaving as PASSTHROUGH.
-  //
-  // Minimum supported struct_size = 1.0.0 layout (struct_size +
-  // enc_pre_emit + dec_post_read + md_cost_capture). Earlier sizes
-  // are rejected.
-  const size_t kAbi100Size =
-      offsetof(PhasmStegoCallbacks, dual_recon_observe);
-  if (callbacks->struct_size < kAbi100Size) {
+  // Caller's struct_size must match the current ABI exactly. phasm
+  // owns both sides of this boundary (the fork is vendored, the
+  // bindings live in core-openh264-sys, both ship together) so we
+  // don't carry version-tolerance machinery. A mismatch means the
+  // bindings are out of sync with the fork — fix the caller.
+  if (callbacks->struct_size != sizeof(PhasmStegoCallbacks)) {
     return -1;
   }
 
-  std::memset(&g_phasm_callbacks, 0, sizeof(g_phasm_callbacks));
-  g_phasm_callbacks.struct_size       = sizeof(PhasmStegoCallbacks);
-  g_phasm_callbacks.enc_pre_emit      = callbacks->enc_pre_emit;
-  g_phasm_callbacks.dec_post_read     = callbacks->dec_post_read;
-  g_phasm_callbacks.md_cost_capture   = callbacks->md_cost_capture;
-  // ABI 1.2.0+ fields — only present if caller's struct_size includes them.
-  if (callbacks->struct_size >= offsetof(PhasmStegoCallbacks, capture_mb_decision)) {
-    g_phasm_callbacks.dual_recon_observe = callbacks->dual_recon_observe;
-  }
-  // ABI 1.3.0+ fields.
-  if (callbacks->struct_size >= sizeof(PhasmStegoCallbacks)) {
-    g_phasm_callbacks.capture_mb_decision = callbacks->capture_mb_decision;
-    g_phasm_callbacks.replay_mb_decision  = callbacks->replay_mb_decision;
-  }
+  g_phasm_callbacks = *callbacks;
   g_phasm_user_data = user_data;
-  // Reset pass mode on fresh registration. Caller selects per-pass.
   g_phasm_pass_mode = PHASM_PASS_PASSTHROUGH;
   return 0;
 }

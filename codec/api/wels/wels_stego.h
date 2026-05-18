@@ -290,7 +290,7 @@ typedef void (*PhasmStegoDualReconFn)(uint32_t frame_num,
  * ------------------------------------------------------------------ */
 
 /* ---------------------------------------------------------------------
- * 6.7 Pass-2 replay architecture (ABI 1.3.0+)
+ * 6.7 Pass-2 replay architecture
  *
  * Option A — see `docs/design/video/h264/pass2-replay-architecture.md`
  * in the phasm repo. Closes the cascade-safety whack-a-mole loop by
@@ -306,7 +306,7 @@ typedef void (*PhasmStegoDualReconFn)(uint32_t frame_num,
  * replay verbatim.
  *
  * `PhasmStegoPassMode` selects encoder behaviour:
- *   PASSTHROUGH (0) = default; no capture/replay (pre-1.3.0 behaviour).
+ *   PASSTHROUGH (0) = default; no capture/replay fires.
  *   CAPTURE     (1) = encoder runs RDO/ME, calls capture callback
  *                     once per MB with finalized decision.
  *   REPLAY      (2) = encoder calls replay callback at each MB entry;
@@ -352,7 +352,7 @@ typedef struct PhasmStegoMbDecision {
 
   /* === Padding / future expansion === */
   uint8_t  _reserved[6];
-} PhasmStegoMbDecision;  /* 176 bytes */
+} PhasmStegoMbDecision;  /* 180 bytes (4-byte aligned) */
 
 /* Pass-1 capture callback. Fires once per MB AFTER mode decision is
  * finalized and BEFORE WelsInterMbEncode / WelsIMbChromaEncode runs
@@ -430,18 +430,10 @@ void WelsStegoSetFrameNum(uint32_t frame_num);
 /* ---------------------------------------------------------------------
  * 10. Library version probe
  *
- * Returns the wels_stego ABI version this library was built with.
- * Format: (MAJOR << 16) | (MINOR << 8) | PATCH. MAJOR bumps on
- * breaking changes; MINOR on additive (new callback fields appended
- * to the end of structs); PATCH on doc-only changes.
- *
- * Current version: 1.3.0 (0x010300). 1.3.0 adds Pass-2 replay
- * architecture (Option A): `PhasmStegoMbDecision` struct + capture /
- * replay callbacks + `WelsStegoSetPassMode`. Closes the cascade-
- * safety cycle by letting Pass-1 capture full mode decisions and
- * Pass-2 force-replay them. 1.2.0 added `dual_recon_observe` (Phase
- * C.8.2). 1.1.0 wired `md_cost_capture`. 1.0.0 shipped the original
- * 3 callbacks.
+ * Build-time sanity check that the linked fork matches the bindings.
+ * Bumped on every public ABI change. Phasm owns both sides of this
+ * boundary — fork + Rust bindings ship together — so a mismatch
+ * here means someone forgot to bump the SHA pin.
  * ------------------------------------------------------------------ */
 
 #define PHASM_STEGO_ABI_VERSION 0x010300u
