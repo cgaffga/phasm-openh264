@@ -816,7 +816,9 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    *
    * Position descriptor:
    *   block_cat    = CHROMA_DC (3)
-   *   partition_idx = iUV - 1 (0=Cb, 1=Cr) — disambiguates plane
+   *   partition_idx = iUV - 1 (0=Cb, 1=Cr) — disambiguates plane for
+   *                   the phasm-side callback (and wire-only scratch
+   *                   key via apply_coeff_hooks_to_level plane-bias)
    *   sub_block    = 0 (chroma DC has no sub-block; the 4 entries are
    *                     the Hadamard-domain coefs of the 2x2 DC block)
    *   coeff_idx    = 0..3 (Hadamard order)
@@ -899,9 +901,14 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * Position descriptor:
    *   block_cat    = CHROMA_AC (4)
    *   partition_idx = iUV-1 (0=Cb, 1=Cr) — disambiguates plane for the
-   *                   phasm-side callback
+   *                   phasm-side callback (and wire-only scratch key
+   *                   via apply_coeff_hooks_to_level plane-bias logic)
    *   sub_block    = block_idx_within_plane (0..3)
-   *   coeff_idx    = scanned_idx (0..14)
+   *   coeff_idx    = SCAN position 0..14 (chroma AC zigzag scan). The
+   *                   Rust PositionKey for ChromaAc reads this DIRECTLY
+   *                   as scan (no inv_zigzag transform). 4.5.d.3 must
+   *                   skip the raster→scan conversion for CHROMA_AC
+   *                   since input is already scan.
    *
    * The helper enforces non-zero-in/non-zero-out, so sign-flips and
    * suffix-LSB on |level|>=15 preserve iSingleCtr8x8 contribution. JVT

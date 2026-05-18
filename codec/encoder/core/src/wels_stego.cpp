@@ -223,42 +223,66 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
    * within the same MB; pure no-op under flag OFF. */
   phasm_maybe_reset_for_mb(pos->frame_num, pos->mb_x, pos->mb_y);
 
-  /* Phase 4.5.d.3 — per-block_cat raster→scan conversion for the
-   * scratch-table key. Callers (HOOK-A/B/E/F/G in svc_encode_mb.cpp)
-   * pass coeff_idx_scanned in RASTER order within the 4x4 block.
-   * The emit-side bypass-bin hook keys by SCAN position (0..15 for
-   * LUMA_4x4, 0..14 for AC types where DC scan slot 0 is skipped,
-   * 0 for DC types where coeff_idx is meaningless). The Rust
-   * callback (invoked via dispatch_hook below) continues to see
-   * the RASTER coeff_idx via pos.coeff_idx — only the scratch slot
-   * key is canonicalised here.
+  /* Phase 4.5.d.3 + #538.4.7 chroma fix — per-block_cat key derivation
+   * for the scratch-table slot. The Rust PositionKey contract is
+   * preserved on `pos` (sent to dispatch_hook unmodified); a separate
+   * `scratch_*` local computes the slot key, then is applied to a
+   * scratch_pos copy of pos right before phasm_set_bypass_override.
    *
-   * Block-cat values (defined in svc_encode_mb.cpp #defines):
-   *   0 = LUMA_DC    : coeff_idx unused (0); scan_idx_for_scratch = 0
-   *   1 = LUMA_AC    : raster 1..15 → AC scan 0..14
-   *   2 = LUMA_4x4   : raster 0..15 → full scan 0..15
-   *   3 = CHROMA_DC  : 2x2 DC vector, coeff_idx unused; = 0
-   *   4 = CHROMA_AC  : raster 1..15 → AC scan 0..14
+   * Callers pass `coeff_idx_scanned` with the convention DIFFERING by
+   * block_cat (matches what the Rust PositionKey expects):
+   *
+   *   0 LUMA_DC    : coeff_idx = 0 (unused); sub_block = raster 0..15
+   *   1 LUMA_AC    : coeff_idx = RASTER 1..15; sub_block = raster 0..15
+   *   2 LUMA_4x4   : coeff_idx = RASTER 0..15; sub_block = raster 0..15
+   *   3 CHROMA_DC  : coeff_idx = HADAMARD 0..3; sub_block = 0 (unused)
+   *                  partition_idx = plane (0=Cb, 1=Cr)
+   *   4 CHROMA_AC  : coeff_idx = SCAN 0..14; sub_block = block-within-plane 0..3
+   *                  partition_idx = plane (0=Cb, 1=Cr)
+   *
+   * Emit-side keys it derives:
+   *
+   *   0 LUMA_DC    : sb = raster (via g_zigzag),       ci = 0
+   *   1 LUMA_AC    : sb = raster (via cache→raster),   ci = scan 0..14
+   *   2 LUMA_4x4   : sb = raster (via cache→raster),   ci = scan 0..15
+   *   3 CHROMA_DC  : sb = Hadamard idx + plane*4,      ci = 0
+   *   4 CHROMA_AC  : sb = raster + plane*4,            ci = scan 0..14
+   *
+   * Scratch slot keys are made to match emit:
+   *   - LUMA_AC/4x4: coeff_idx is raster, convert via inv_zigzag.
+   *   - CHROMA_AC:   coeff_idx is ALREADY scan (no conversion);
+   *                  sub_block += plane*4 for Cb↔Cr disambiguation.
+   *   - CHROMA_DC:   sub_block ↔ coeff_idx swap (Hadamard idx moves
+   *                  from coeff_idx into sub_block); plane*4 bias.
    */
-  uint8_t scan_coeff_idx_for_scratch = coeff_idx_scanned;
+  uint8_t scratch_sub_block       = sub_block;
+  uint8_t scratch_coeff_idx       = coeff_idx_scanned;
   if (wire_only) {
+    const uint8_t chroma_plane_off =
+        (block_cat == 3 || block_cat == 4) && pos->partition_idx < 2
+            ? (uint8_t)(pos->partition_idx * 4)
+            : (uint8_t)0;
     switch (block_cat) {
-      case 1: /* LUMA_AC */
-      case 4: /* CHROMA_AC */
+      case 1: /* LUMA_AC: coeff_idx is RASTER 1..15 → scan 0..14. */
         if (coeff_idx_scanned >= 1 && coeff_idx_scanned < 16) {
-          scan_coeff_idx_for_scratch =
-              (uint8_t)(inv_zigzag_full_4x4[coeff_idx_scanned] - 1);
+          scratch_coeff_idx = (uint8_t)(inv_zigzag_full_4x4[coeff_idx_scanned] - 1);
         }
         break;
-      case 2: /* LUMA_4x4 */
+      case 2: /* LUMA_4x4: coeff_idx is RASTER 0..15 → scan 0..15. */
         if (coeff_idx_scanned < 16) {
-          scan_coeff_idx_for_scratch = inv_zigzag_full_4x4[coeff_idx_scanned];
+          scratch_coeff_idx = inv_zigzag_full_4x4[coeff_idx_scanned];
         }
         break;
-      case 0: /* LUMA_DC */
-      case 3: /* CHROMA_DC */
+      case 4: /* CHROMA_AC: coeff_idx is already SCAN. Add plane bias. */
+        scratch_sub_block = (uint8_t)(sub_block + chroma_plane_off);
+        /* scratch_coeff_idx stays = coeff_idx_scanned (scan). */
+        break;
+      case 3: /* CHROMA_DC: swap (sb=0, ci=had) → (sb=had+plane*4, ci=0). */
+        scratch_sub_block = (uint8_t)(coeff_idx_scanned + chroma_plane_off);
+        scratch_coeff_idx = 0;
+        break;
+      case 0: /* LUMA_DC: sub_block=raster (caller), coeff_idx=0 already. */
       default:
-        /* coeff_idx is 0 for DC types; no conversion. */
         break;
     }
   }
@@ -268,12 +292,13 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   if (override_sign == 0 || override_sign == 1) {
     if (override_sign != orig_sign) {
       if (wire_only) {
-        /* Populate scratch with scan-converted coeff_idx so the
-         * emit-side hook (which keys by scan position) finds it.
-         * Pos passed to dispatch_hook above keeps raster — Rust
-         * callback contract unchanged. */
+        /* Populate scratch with the per-block_cat scratch keys derived
+         * above (raster→scan / Cb↔Cr plane bias / CHROMA_DC sb↔ci swap).
+         * Pos passed to dispatch_hook keeps the Rust-callback contract
+         * unchanged — only the scratch slot key is canonicalised here. */
         PhasmStegoPos scratch_pos = *pos;
-        scratch_pos.coeff_idx = scan_coeff_idx_for_scratch;
+        scratch_pos.sub_block = scratch_sub_block;
+        scratch_pos.coeff_idx = scratch_coeff_idx;
         phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, &scratch_pos, override_sign);
       } else {
         int16_t new_level = apply_sign_override(level, override_sign);
@@ -317,9 +342,10 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
     if (override_lsb == 0 || override_lsb == 1) {
       if (override_lsb != orig_lsb) {
         if (wire_only) {
-          /* Same scan-converted scratch key as the sign branch above. */
+          /* Same scratch key as the sign branch above. */
           PhasmStegoPos scratch_pos = *pos;
-          scratch_pos.coeff_idx = scan_coeff_idx_for_scratch;
+          scratch_pos.sub_block = scratch_sub_block;
+          scratch_pos.coeff_idx = scratch_coeff_idx;
           phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb);
         } else {
           int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);

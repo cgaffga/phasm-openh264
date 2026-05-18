@@ -66,36 +66,54 @@ static const uint8_t g_phasm_zigzag_scan_4x4[16] = {
 /* 2x2 chroma DC zigzag — identity (4 entries in raster order). */
 static const uint8_t g_phasm_zigzag_scan_2x2[4] = { 0, 1, 2, 3 };
 
-/* #538 Phase 4.6 — convert OpenH264's "cache offset" iIdx (the value
- * stored at g_kuiCache48CountScan4Idx[i] for the i-th 4x4 block in
- * scan order over the MB) back to a raster sub-block index. The
- * cache is a 6x8 grid (LDC layout); luma 4x4 blocks live at rows 1..4
- * cols 1..4, Cb at rows 1..2 cols 6..7, Cr at rows 4..5 cols 6..7.
+/* #538 Phase 4.6 + 4.7v3 — convert OpenH264's "cache offset" iIdx
+ * (the value stored at g_kuiCache48CountScan4Idx[i] for the i-th
+ * 4x4 block in encoding order over the MB) back to the Z-SCAN
+ * block index `i` that populate-side hooks pass as `sub_block`.
  *
- * Populate-side hooks (HOOK-B/E/F in svc_encode_mb.cpp) pass raster
- * sub-block indices 0..15 (luma) or 0..3 within plane (chroma) — see
- * `apply_coeff_hooks_to_level` documentation. The wire-only scratch
- * is keyed by raster sub-block. Emit's `iIdx` is a cache offset, not
- * raster, so this conversion is needed for populate↔emit alignment.
+ * The cache is a 6x8 grid (LDC layout); luma 4x4 blocks live at
+ * rows 1..4 cols 1..4 — but in Z-SCAN encoding order (the 4 4x4
+ * blocks within each 8x8 quadrant come first, then the next 8x8
+ * quadrant in Z order). Cb at rows 1..2 cols 6..7, Cr at rows
+ * 4..5 cols 6..7 (Z-scan within plane is 2x2 = identity).
  *
- * For CHROMA_AC the within-plane raster is 0..3 for BOTH Cb and Cr,
- * so the scratch slot doesn't currently disambiguate plane —
- * partition_idx in PhasmStegoPos identifies the plane on the
- * populate side but isn't part of the scratch key. That's a Cb↔Cr
- * collision bug (TODO #538.4.7); luma is unaffected. */
-static inline uint8_t phasm_cache_offset_to_raster_subblock(int32_t iIdx,
-                                                             ECtxBlockCat eCtxBlockCat) {
+ * Populate-side (HOOK-E in svc_encode_mb.cpp:486 passes uiI4x4Idx,
+ * HOOK-F at :693 passes phasm_sb iterating 0..15) uses Z-SCAN i.
+ * The Rust walker keys on `block_idx = pos.sub_block` opaquely
+ * (see encoder_pos_to_phasm_position_key Luma4x4 branch); the
+ * convention is Z-scan because that's what the encoder fires with.
+ *
+ * v2 (raster) was WRONG: at Z-scan index 11 (raster 13), 12 (raster
+ * 10), 2 (raster 4), etc., the conversion produced raster but
+ * populate uses Z-scan — keys diverged at 12 of 16 luma block
+ * positions where Z-scan ≠ raster. 3 of the 4 residual diffs after
+ * v2 chroma fixes were Luma4x4 at blocks 11 and 12.
+ *
+ * #538.4.7 plane bias: CHROMA_AC Cb → 0..3, Cr → 4..7 (encodes
+ * plane in sub_block since phasm_scratch_slot doesn't index by
+ * partition_idx for coeff domains). Populate mirrors via
+ * apply_coeff_hooks_to_level's chroma plane-bias logic. */
+static inline uint8_t phasm_cache_offset_to_block_idx(int32_t iIdx,
+                                                       ECtxBlockCat eCtxBlockCat) {
   const int32_t row = iIdx / 8;
   const int32_t col = iIdx % 8;
   if (eCtxBlockCat == LUMA_AC || eCtxBlockCat == LUMA_4x4) {
-    /* Luma 4x4 blocks: cache rows 1..4, cols 1..4 → raster rows 0..3, cols 0..3. */
-    return (uint8_t)((row - 1) * 4 + (col - 1));
+    /* Z-scan over 8x8 quadrants (i ∈ 0..3 covers top-left, etc.).
+     * Within each 8x8: Z-scan over its 4 4x4 blocks. */
+    const int32_t big_row   = (row - 1) >> 1;
+    const int32_t big_col   = (col - 1) >> 1;
+    const int32_t small_row = (row - 1) & 1;
+    const int32_t small_col = (col - 1) & 1;
+    return (uint8_t)((big_row * 2 + big_col) * 4 + (small_row * 2 + small_col));
   }
   if (eCtxBlockCat == CHROMA_AC) {
-    /* Chroma 4x4 blocks: Cb rows 1..2 / Cr rows 4..5, cols 6..7. */
-    const int32_t raster_r = (row >= 4) ? (row - 4) : (row - 1);
-    const int32_t raster_c = col - 6;
-    return (uint8_t)(raster_r * 2 + raster_c);
+    /* Chroma 4x4: Cb (rows 1-2) → plane=0, Cr (rows 4-5) → plane=1.
+     * Within plane the 2x2 layout is identity Z-scan.
+     * Plane-bias: Cb i=0..3, Cr i=4..7. */
+    const int32_t is_cr = (row >= 4) ? 1 : 0;
+    const int32_t start_row = is_cr ? 4 : 1;
+    const int32_t i_within = (row - start_row) * 2 + (col - 6);
+    return (uint8_t)(i_within + is_cr * 4);
   }
   /* DC types are not routed through this helper. */
   return (uint8_t)iIdx;
@@ -693,12 +711,17 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
             phasm_sub_block_csl = g_phasm_zigzag_scan_4x4[phasm_scan_pos];
             phasm_coeff_idx_csl = 0;
           } else if (eCtxBlockCat == CHROMA_DC) {
-            phasm_sub_block_csl = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
+            /* #538.4.7 fix: bias sub_block by plane (iIdx=1 → Cb +0,
+             * iIdx=2 → Cr +4). Mirrors HOOK-C populate-side bias. */
+            const uint8_t phasm_plane_off_csl = (iIdx == 2) ? 4 : 0;
+            phasm_sub_block_csl = (uint8_t)(g_phasm_zigzag_scan_2x2[phasm_scan_pos] + phasm_plane_off_csl);
             phasm_coeff_idx_csl = 0;
           } else {
             /* #538 Phase 4.6 — iIdx is a CACHE OFFSET (e.g. 9, 10, 17,
-             * 18, ...) not a raster sub-block index. Convert it. */
-            phasm_sub_block_csl = phasm_cache_offset_to_raster_subblock(iIdx, eCtxBlockCat);
+             * 18, ...) not a raster sub-block index. Convert it.
+             * For CHROMA_AC the helper also biases by plane
+             * (Cb=0..3, Cr=4..7) — see #538.4.7. */
+            phasm_sub_block_csl = phasm_cache_offset_to_block_idx(iIdx, eCtxBlockCat);
             phasm_coeff_idx_csl = (uint8_t)phasm_scan_pos;
           }
           PhasmStegoPos phasm_pos_csl;
@@ -738,12 +761,17 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
           phasm_sub_block = g_phasm_zigzag_scan_4x4[phasm_scan_pos];
           phasm_coeff_idx = 0;
         } else if (eCtxBlockCat == CHROMA_DC) {
-          phasm_sub_block = g_phasm_zigzag_scan_2x2[phasm_scan_pos];
+          /* #538.4.7 fix: bias sub_block by plane (iIdx=1 → Cb +0,
+           * iIdx=2 → Cr +4). Mirrors HOOK-C populate-side bias. */
+          const uint8_t phasm_plane_off = (iIdx == 2) ? 4 : 0;
+          phasm_sub_block = (uint8_t)(g_phasm_zigzag_scan_2x2[phasm_scan_pos] + phasm_plane_off);
           phasm_coeff_idx = 0;
         } else {
           /* #538 Phase 4.6 — iIdx is a CACHE OFFSET (e.g. 9, 10, 17,
-           * 18, ...) not a raster sub-block index. Convert it. */
-          phasm_sub_block = phasm_cache_offset_to_raster_subblock(iIdx, eCtxBlockCat);
+           * 18, ...) not a raster sub-block index. Convert it.
+           * For CHROMA_AC the helper also biases by plane
+           * (Cb=0..3, Cr=4..7) — see #538.4.7. */
+          phasm_sub_block = phasm_cache_offset_to_block_idx(iIdx, eCtxBlockCat);
           phasm_coeff_idx = (uint8_t)phasm_scan_pos;
         }
         PhasmStegoPos phasm_pos;
