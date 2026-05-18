@@ -342,11 +342,34 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
     if (override_lsb == 0 || override_lsb == 1) {
       if (override_lsb != orig_lsb) {
         if (wire_only) {
-          /* Same scratch key as the sign branch above. */
+          /* Same scratch key as the sign branch above.
+           *
+           * #533.4.9 ROOT CAUSE FIX (2026-05-18): walker_bit ↔ wire LSB
+           * inversion for CSL. The walker computes its cover bit as
+           * `(abs & 1) ^ 1` (inject.rs:357 `suffix_lsb_bit_for_magnitude`)
+           * and flips |coeff| magnitude by ±1 to override
+           * (`apply_coeff_suffix_lsb_overrides` at inject.rs:398). The
+           * encoder's UEG0 emit, however, writes the actual suffix LSB
+           * bin which equals `|coeff| & 1` (= walker_bit XOR 1) — wire
+           * LSB and walker_bit are inverted for CSL.
+           *
+           * `orig_lsb = (|coeff|-15)&1` happens to equal walker_bit (both
+           * reflect |coeff| parity the same way), so the dispatch_hook
+           * comparison `override_lsb != orig_lsb` is in walker_bit
+           * representation. The scratch slot, however, is read at emit
+           * AS the wire LSB to write (via `phasm_apply_bypass_bin_override`
+           * → `WelsCabacEncodeBypassOne` directly emits the byte as a
+           * bypass bin). Writing the walker_bit verbatim corresponds to
+           * a no-op flip on the wire (wire stays at orig |coeff|, walker
+           * decodes the unchanged magnitude). XOR-1 converts walker_bit
+           * → wire LSB so the emitted wire bit decodes to the planned
+           * |coeff|±1, which is what the walker's cover allocation
+           * assumes. Sign domain does not need this (walker bit ==
+           * wire bin for sign). */
           PhasmStegoPos scratch_pos = *pos;
           scratch_pos.sub_block = scratch_sub_block;
           scratch_pos.coeff_idx = scratch_coeff_idx;
-          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb);
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb ^ 1);
         } else {
           int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);
           if (new_level != 0) {
