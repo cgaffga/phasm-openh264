@@ -154,6 +154,33 @@ int32_t dispatch_hook(PhasmStegoPos* pos, PhasmStegoDomain domain,
   return cb(pos, original_bit, PhasmStegoGetUserData());
 }
 
+/* #538 Phase 4.5.d.3 — inverse 4x4 zigzag (raster → scan). Inverse
+ * of g_phasm_zigzag_scan_4x4 in svc_set_mb_syn_cabac.cpp. Computed
+ * once from the table:
+ *   g_zigzag[scan] = raster
+ *     {0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15}
+ *   ↓
+ *   inv_zigzag[raster] = scan
+ *     {0,1,5,6,2,4,7,12,3,8,11,13,9,10,14,15}
+ *
+ * Used in the wire-only branch of apply_coeff_hooks_to_level to
+ * convert populate-side RASTER coeff_idx (0..15 within a 4x4 block)
+ * to the canonical SCAN position the emit-side scratch lookup
+ * keys on. For AC blocks (LUMA_AC, CHROMA_AC, where iStartIdx=1)
+ * the AC scan position is `inv_zigzag[raster] - 1` (full scan
+ * position minus 1, since AC scan 0 = full scan 1 = raster 1).
+ * For full blocks (LUMA_4x4) it's `inv_zigzag[raster]` directly.
+ *
+ * The Rust callback (dispatch_hook) is ALWAYS invoked with the
+ * unmodified pos (raster coeff_idx) — only the scratch-table key
+ * passed to phasm_set_bypass_override is scan-converted. This
+ * preserves the existing callback contract (raster) while making
+ * the scratch lookup canonical (scan) so the emit-side hook
+ * (which has scan via iLevelScanPos) finds the slot. */
+static const uint8_t inv_zigzag_full_4x4[16] = {
+  0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15
+};
+
 // Apply coefficient sign + suffix-LSB hooks to a single non-zero level.
 //
 // Phase 4.5.c branch: when `g_phasm_use_wire_only_overrides` is ON,
@@ -196,14 +223,58 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
    * within the same MB; pure no-op under flag OFF. */
   phasm_maybe_reset_for_mb(pos->frame_num, pos->mb_x, pos->mb_y);
 
+  /* Phase 4.5.d.3 — per-block_cat raster→scan conversion for the
+   * scratch-table key. Callers (HOOK-A/B/E/F/G in svc_encode_mb.cpp)
+   * pass coeff_idx_scanned in RASTER order within the 4x4 block.
+   * The emit-side bypass-bin hook keys by SCAN position (0..15 for
+   * LUMA_4x4, 0..14 for AC types where DC scan slot 0 is skipped,
+   * 0 for DC types where coeff_idx is meaningless). The Rust
+   * callback (invoked via dispatch_hook below) continues to see
+   * the RASTER coeff_idx via pos.coeff_idx — only the scratch slot
+   * key is canonicalised here.
+   *
+   * Block-cat values (defined in svc_encode_mb.cpp #defines):
+   *   0 = LUMA_DC    : coeff_idx unused (0); scan_idx_for_scratch = 0
+   *   1 = LUMA_AC    : raster 1..15 → AC scan 0..14
+   *   2 = LUMA_4x4   : raster 0..15 → full scan 0..15
+   *   3 = CHROMA_DC  : 2x2 DC vector, coeff_idx unused; = 0
+   *   4 = CHROMA_AC  : raster 1..15 → AC scan 0..14
+   */
+  uint8_t scan_coeff_idx_for_scratch = coeff_idx_scanned;
+  if (wire_only) {
+    switch (block_cat) {
+      case 1: /* LUMA_AC */
+      case 4: /* CHROMA_AC */
+        if (coeff_idx_scanned >= 1 && coeff_idx_scanned < 16) {
+          scan_coeff_idx_for_scratch =
+              (uint8_t)(inv_zigzag_full_4x4[coeff_idx_scanned] - 1);
+        }
+        break;
+      case 2: /* LUMA_4x4 */
+        if (coeff_idx_scanned < 16) {
+          scan_coeff_idx_for_scratch = inv_zigzag_full_4x4[coeff_idx_scanned];
+        }
+        break;
+      case 0: /* LUMA_DC */
+      case 3: /* CHROMA_DC */
+      default:
+        /* coeff_idx is 0 for DC types; no conversion. */
+        break;
+    }
+  }
+
   int32_t orig_sign = (level < 0) ? 1 : 0;
   int32_t override_sign = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SIGN, orig_sign);
   if (override_sign == 0 || override_sign == 1) {
     if (override_sign != orig_sign) {
       if (wire_only) {
-        /* Populate scratch — emit-side bypass-bin hook flips the
-         * wire bit. Encoder state stays clean. */
-        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, pos, override_sign);
+        /* Populate scratch with scan-converted coeff_idx so the
+         * emit-side hook (which keys by scan position) finds it.
+         * Pos passed to dispatch_hook above keeps raster — Rust
+         * callback contract unchanged. */
+        PhasmStegoPos scratch_pos = *pos;
+        scratch_pos.coeff_idx = scan_coeff_idx_for_scratch;
+        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, &scratch_pos, override_sign);
       } else {
         int16_t new_level = apply_sign_override(level, override_sign);
         if (new_level != 0) {
@@ -246,7 +317,10 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
     if (override_lsb == 0 || override_lsb == 1) {
       if (override_lsb != orig_lsb) {
         if (wire_only) {
-          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, pos, override_lsb);
+          /* Same scan-converted scratch key as the sign branch above. */
+          PhasmStegoPos scratch_pos = *pos;
+          scratch_pos.coeff_idx = scan_coeff_idx_for_scratch;
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb);
         } else {
           int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);
           if (new_level != 0) {
