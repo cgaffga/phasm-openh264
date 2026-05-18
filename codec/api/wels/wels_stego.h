@@ -526,6 +526,27 @@ int phasm_apply_bypass_bin_override (uint8_t domain,
                                       const PhasmStegoPos* pos,
                                       int orig_bin);
 
+/* Phase 4.5.b (#538) — wire-only override mode gate.
+ *
+ * When enabled (set to non-zero), the mutating-hook helpers route
+ * stego override decisions into the per-MB scratch table (read by
+ * `phasm_apply_bypass_bin_override` at CABAC emit) and do NOT
+ * mutate the encoder's stored level / MV state. Pass-2's pDecPic
+ * stays byte-identical to Pass-1's, and the stego override only
+ * manifests on the wire via the bypass-bin emit hooks.
+ *
+ * When disabled (default), the helpers keep their pre-4.5
+ * behaviour: invoke the Rust callback, mutate *level / MV state
+ * in place. Required for backwards compatibility with the C.8.x
+ * dual-recon machinery and the 19 lib tests that verify the
+ * mutated-state path.
+ *
+ * Default OFF. Set to non-zero before encoding to opt into the
+ * wire-only path. Phase 5 (#539) flips the default to ON once
+ * the C.8.x machinery is deleted. */
+void phasm_set_use_wire_only_overrides (int enabled);
+int  phasm_get_use_wire_only_overrides (void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
