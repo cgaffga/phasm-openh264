@@ -2159,15 +2159,18 @@ void WelsMdInterMb (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SSlice* pSlice, SMB*
   SDqLayer* pCurDqLayer             = pEncCtx->pCurDqLayer;
   SMbCache* pMbCache                = &pSlice->sMbCacheInfo;
 
-  /* #533.3 Stage 1 — Pass-2 REPLAY override.
+  /* #533.3 Stages 1+2A — Pass-2 REPLAY override.
    *
    * If REPLAY mode is active and the consumer has a cached decision
-   * for this MB, short-circuit RDO/ME. Stage 1 handles only SKIP
-   * (the common-case fast path in P-frames); other mb_types fall
-   * through to normal mode decision until Stage 2/3 add their
-   * replay branches. WelsMdInterDecidedPskip writes uiMbType + sMv
-   * + recon deterministically from the same neighbour state that
-   * Pass-1 saw, so REPLAY-SKIP is byte-identical to natural Skip. */
+   * for this MB, short-circuit RDO/ME and replay the cached choice.
+   *
+   *   Stage 1 — MB_TYPE_SKIP (P-Skip).
+   *   Stage 2A — MB_TYPE_16x16 (P_16x16, single MV, single ref).
+   *
+   * Other mb_types (partitioned / B_8x8 / intra) fall through to
+   * normal mode decision until Stages 2B/2C/2D land. Replay derives
+   * MVD/PMV/CBP from the same neighbour state Pass-1 saw, so the
+   * emit is byte-identical to natural mode-decision output. */
   if (PhasmStegoGetPassMode() == PHASM_PASS_REPLAY) {
     PhasmStegoMbDecision d;
     if (phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
@@ -2176,8 +2179,50 @@ void WelsMdInterMb (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SSlice* pSlice, SMB*
         WelsMdInterDecidedPskip (pEncCtx, pSlice, pCurMb, pMbCache);
         return;
       }
-      /* Non-SKIP mb_types: Stage 2+ (P_16x16) and Stage 3+
-       * (partitioned + intra). Fall through for now. */
+      /* Stage 2A — P_16x16 (single-MV / single-ref). Pattern mirrors
+       * WelsMdBackgroundMbEnc non-skip flow: MC luma+chroma at the
+       * cached MV into pMemPredLuma/pMemPredChroma, set uiMbType +
+       * sP16x16Mv, populate sMbMvp via PredMv (so downstream MVD
+       * emit computes correctly), broadcast MV via
+       * UpdateP16x16MotionInfo, then run WelsMdInterEncode for
+       * residual + chroma + reconstruct. */
+      if ((d.ui_mb_type & MB_TYPE_16x16)
+          && !(d.ui_mb_type & (MB_TYPE_INTRA4x4 | MB_TYPE_INTRA16x16
+                               | MB_TYPE_INTRA8x8 | MB_TYPE_INTRA_BL
+                               | MB_TYPE_INTRA_PCM))) {
+        SMVUnitXY sMv;
+        sMv.iMvX = (int16_t)d.mv_x[0][0];
+        sMv.iMvY = (int16_t)d.mv_y[0][0];
+        const int8_t kiRef = (int8_t)d.ref_idx[0][0];
+
+        SWelsFuncPtrList* pFunc  = pEncCtx->pFuncList;
+        uint8_t* pRefLuma        = pMbCache->SPicData.pRefMb[0];
+        uint8_t* pRefCb          = pMbCache->SPicData.pRefMb[1];
+        uint8_t* pRefCr          = pMbCache->SPicData.pRefMb[2];
+        const int32_t iLineSizeY  = pCurDqLayer->pRefPic->iLineSize[0];
+        const int32_t iLineSizeUV = pCurDqLayer->pRefPic->iLineSize[1];
+
+        pFunc->sMcFuncs.pMcLumaFunc (pRefLuma, iLineSizeY,
+                                     pMbCache->pMemPredLuma, 16,
+                                     sMv.iMvX, sMv.iMvY, 16, 16);
+        pFunc->sMcFuncs.pMcChromaFunc (pRefCb, iLineSizeUV,
+                                       pMbCache->pMemPredChroma, 8,
+                                       sMv.iMvX, sMv.iMvY, 8, 8);
+        pFunc->sMcFuncs.pMcChromaFunc (pRefCr, iLineSizeUV,
+                                       pMbCache->pMemPredChroma + 64, 8,
+                                       sMv.iMvX, sMv.iMvY, 8, 8);
+
+        pCurMb->uiMbType  = MB_TYPE_16x16;
+        pCurMb->sP16x16Mv = sMv;
+        SMVUnitXY sMvp;
+        PredMv (&pMbCache->sMvComponents, 0, 4, kiRef, &sMvp);
+        pMbCache->sMbMvp[0] = sMvp;
+        UpdateP16x16MotionInfo (pMbCache, pCurMb, kiRef, &sMv);
+
+        WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
+        return;
+      }
+      /* Non-{SKIP, P_16x16}: partitioned / B_8x8 / intra. Stage 2B+. */
     }
   }
 
