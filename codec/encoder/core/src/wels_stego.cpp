@@ -116,6 +116,29 @@ int32_t dispatch_hook(PhasmStegoPos* pos, PhasmStegoDomain domain,
 }
 
 // Apply coefficient sign + suffix-LSB hooks to a single non-zero level.
+//
+// Phase 4.5.c branch: when `g_phasm_use_wire_only_overrides` is ON,
+// the function populates `phasm_set_bypass_override` instead of
+// mutating *level. Original level is returned unchanged so the
+// encoder's stored coefficient stays clean. Decoder reads the
+// flipped wire bin and applies the same flip in its parser state,
+// regenerating the stego'd pixel value during decode. With flag OFF
+// (default), behaviour matches pre-4.5 — mutate-then-return.
+//
+// Indexing caveat (#538 4.5.b TODO): in wire-only mode, the
+// populate-side slot key is (block_cat, sub_block, coeff_idx_scanned)
+// straight off the caller. For HOOK-A (LUMA_DC) coeff_idx_scanned is
+// always 0, so the slot matches the emit-side key cleanly. For
+// HOOK-B / -E / -F / -G the populate-side `coeff_idx_scanned` is
+// RASTER index 0..15 while the emit-side bypass-bin hook keys by
+// `iNonZeroIdx` (compressed index into the scan-ordered iLevel[]
+// array). Until Phase 4.5.d wires the raster→scan translation, the
+// wire-only override for non-DC coeff sites will silently no-op
+// (slot populated at one address, emit reads from another). This is
+// safe — never wrong — but means HOOK-B/E/F/G overrides won't fire
+// on the wire until the reconciliation lands. Tracked at the design
+// memo. Phase 4.6 forged-flip test must use HOOK-A positions only
+// until 4.5.d ships.
 int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
                                    uint8_t sub_block,
                                    uint8_t coeff_idx_scanned,
@@ -128,18 +151,44 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   pos->mv_component = 0xff;
   pos->_reserved    = 0;
 
+  const int wire_only = g_phasm_use_wire_only_overrides;
+
   int32_t orig_sign = (level < 0) ? 1 : 0;
   int32_t override_sign = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SIGN, orig_sign);
   if (override_sign == 0 || override_sign == 1) {
     if (override_sign != orig_sign) {
-      int16_t new_level = apply_sign_override(level, override_sign);
-      if (new_level != 0) {
-        level = new_level;
+      if (wire_only) {
+        /* Populate scratch — emit-side bypass-bin hook flips the
+         * wire bit. Encoder state stays clean. */
+        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, pos, override_sign);
+      } else {
+        int16_t new_level = apply_sign_override(level, override_sign);
+        if (new_level != 0) {
+          level = new_level;
+        }
       }
     }
   }
 
-  int16_t abs_level = (level < 0) ? (int16_t)-level : level;
+  /* For the suffix-LSB magnitude check: in wire-only mode the
+   * encoder's *level stays at the original value, so the wire's
+   * "is there a suffix?" branch reads ORIGINAL |level|. The
+   * encoder's CABAC emit decides "if (|coeff|<15) emit decision
+   * 0 else emit UEG suffix" based on the unmodified iLevel[] entry,
+   * so the suffix-LSB override only fires when the original |level|
+   * is already in the |>=16| range. Mutation mode reads the
+   * post-sign-override level, but for sign flips that just swap
+   * positive↔negative the magnitude is unchanged anyway. */
+  int16_t abs_level_for_check = level;
+  if (wire_only) {
+    /* Re-derive absolute value from the input parameter (`level`
+     * here still holds the input value because we never mutated it
+     * above). */
+    abs_level_for_check = (level < 0) ? (int16_t)-level : level;
+  } else {
+    abs_level_for_check = (level < 0) ? (int16_t)-level : level;
+  }
+
   // #505 fix 2026-05-16: threshold tightened from 15 to 16 to match the
   // phasm walker's COEFF_SUFFIX_LSB_THRESHOLD = 16 in
   // `core/src/codec/h264/stego/inject.rs`. Walker doesn't enroll
@@ -148,14 +197,18 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   // |coeff|=16 → 15, position would vanish from walker's cover, cover
   // layout shifts by 1, STC syndrome extraction breaks. Full analysis:
   // `memory/h264_chroma_csl_cascade_gap_504.md`.
-  if (abs_level >= 16) {
-    int32_t orig_lsb = (abs_level - 15) & 1;
+  if (abs_level_for_check >= 16) {
+    int32_t orig_lsb = (abs_level_for_check - 15) & 1;
     int32_t override_lsb = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SUFFIX_LSB, orig_lsb);
     if (override_lsb == 0 || override_lsb == 1) {
       if (override_lsb != orig_lsb) {
-        int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);
-        if (new_level != 0) {
-          level = new_level;
+        if (wire_only) {
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, pos, override_lsb);
+        } else {
+          int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);
+          if (new_level != 0) {
+            level = new_level;
+          }
         }
       }
     }
