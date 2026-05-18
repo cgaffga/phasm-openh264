@@ -417,4 +417,19 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   return 1;
 }
 
+/* Phase 4 (#538) Step 4.1 — Wire-only bypass-bin override dispatch.
+ *
+ * Stub returns the original bin unconditionally. Steps 4.2-4.5
+ * progressively wire this into the 4 CABAC bypass-bin emit sites
+ * (CoeffSign / CoeffSuffixLsb / MvdSign / MvdSuffixLsb), and Step 4.5
+ * adds the scratch-table backing so the mutating hooks can populate
+ * overrides instead of writing to the encoder's stored level / MV. */
+int phasm_apply_bypass_bin_override (uint8_t domain,
+                                      const PhasmStegoPos* pos,
+                                      int orig_bin) {
+  (void)domain;
+  (void)pos;
+  return orig_bin;
+}
+
 }  // extern "C"

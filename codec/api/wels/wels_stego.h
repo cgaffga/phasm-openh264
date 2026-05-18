@@ -485,6 +485,47 @@ uint64_t phasm_get_hook_single_applied(void);
 void phasm_set_dual_recon_enabled(int enabled);
 int  phasm_get_dual_recon_enabled(void);
 
+/* ---------------------------------------------------------------------
+ * Phase 4 (#538) — Wire-only bypass-bin override (Layer 2 of Pass-2).
+ *
+ * The mutating hook lineage (`apply_coeff_hooks_to_level`,
+ * `phasm_apply_mvd_hooks`) writes the encoder's stored level / MV
+ * before CABAC emit, so the natural CABAC encoding produces the
+ * desired wire bin. The side effect is that the encoder's pDecPic
+ * reflects the override — a cascade waiting to break the next MB.
+ *
+ * Phase 4 keeps the encoder state CLEAN. The override applies at
+ * the CABAC bypass-bin emit site only: the caller computes the
+ * desired bin from the current encoder state (clean Pass-1 value)
+ * and the registered override map, then `WelsCabacEncodeBypassOne`
+ * emits the OVERRIDDEN bin. The encoder's stored level / MV never
+ * mutates. pDecPic stays at clean Pass-1 recon by construction.
+ *
+ * Step 4.1 (this commit) — plumbing only. Adds the dispatch entry
+ * point. Stub returns `orig_bin` (no-op). Steps 4.2-4.5 progressively
+ * patch the 4 emit sites (CoeffSign / CoeffSuffixLsb / MvdSign /
+ * MvdSuffixLsb) and migrate the mutating hooks to populate scratch
+ * instead of mutating. Full design at
+ * `docs/design/video/h264/pass2-replay-phase4-plan.md`.
+ * ------------------------------------------------------------------ */
+
+/* Dispatched at each CABAC bypass-bin emit site that phasm overrides.
+ * Returns the bin to emit: `orig_bin` when no override is registered
+ * for this position+domain, or 0/1 when the consumer's override map
+ * specifies otherwise.
+ *
+ * `pos` carries the position identifying fields (sub_block,
+ * coeff_idx, mv_component, ref_idx, mb_x, mb_y, frame_num, …) that
+ * the emit-site caller fills in. `domain` is one of the four stego
+ * domains the function targets (`PHASM_DOMAIN_COEFF_SIGN` /
+ * `_COEFF_SUFFIX_LSB` / `_MVD_SIGN` / `_MVD_SUFFIX_LSB`).
+ *
+ * Returning `-1` is reserved for callbacks that don't want to
+ * override; the caller treats it as "emit `orig_bin`". */
+int phasm_apply_bypass_bin_override (uint8_t domain,
+                                      const PhasmStegoPos* pos,
+                                      int orig_bin);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
