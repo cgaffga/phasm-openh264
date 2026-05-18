@@ -417,19 +417,131 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   return 1;
 }
 
-/* Phase 4 (#538) Step 4.1 — Wire-only bypass-bin override dispatch.
+/* Phase 4 (#538) Step 4.5.a — Bypass-bin scratch table.
  *
- * Stub returns the original bin unconditionally. Steps 4.2-4.5
- * progressively wire this into the 4 CABAC bypass-bin emit sites
- * (CoeffSign / CoeffSuffixLsb / MvdSign / MvdSuffixLsb), and Step 4.5
- * adds the scratch-table backing so the mutating hooks can populate
- * overrides instead of writing to the encoder's stored level / MV. */
+ * Per-MB dense storage for stego bin overrides. Populated by the
+ * mutating-hook successors (`phasm_set_bypass_override`, wired in
+ * later 4.5 sub-steps) and read at CABAC emit time by
+ * `phasm_apply_bypass_bin_override` (Phase 4.2-4.4 hook sites).
+ *
+ * Encoding: each slot is one byte.
+ *   0 = no override (emit bin = orig_bin)
+ *   1 = override bin to 0
+ *   2 = override bin to 1
+ *
+ * Default zero-init means "no override" without any explicit reset
+ * at startup — the table is safe to read from the moment it exists.
+ * `phasm_reset_bypass_overrides` is intended to be called at MB
+ * boundary by callers wired in 4.5.b+; until then the table is never
+ * populated, so contents stay zero and the bypass-bin override hook
+ * is a pure orig_bin passthrough (byte-identical to pre-4.5).
+ *
+ * Sizing:
+ *   - coeff_* : [5 block_cats][16 sub_blocks][16 coeff_idx] = 1280 bytes / domain
+ *   - mvd_*   : [16 partitions][2 components] = 32 bytes / domain
+ *   - total   : ~2624 bytes static. Per-MB single-threaded scope
+ *     (matches the rest of the phasm-stego TU; #339 tracks
+ *     multi-thread revisit).
+ *
+ * Indexing reconciliation (Phase 4.5.b+ TODO): emit-side
+ * `iNonZeroIdx` in svc_set_mb_syn_cabac.cpp is the *compressed* index
+ * into the non-zero-coefficient array `iLevel[]`, NOT the AC scan
+ * position. The populate-side `coeff_idx_scanned` passed to
+ * `phasm_apply_coeff_hooks*` is sometimes raster (HOOK-B) and
+ * sometimes scan-position-equivalent (HOOK-A DC, where coeff_idx is
+ * always 0). The 4.5.b migration step needs to converge both sides
+ * on ONE canonical scheme. Until then the dense table is allocated
+ * but no callers populate it. */
+
+#define PHASM_SCRATCH_BLOCK_CAT_COUNT 5
+#define PHASM_SCRATCH_SUB_BLOCK_MAX   16
+#define PHASM_SCRATCH_COEFF_IDX_MAX   16
+#define PHASM_SCRATCH_PARTITION_MAX   16
+#define PHASM_SCRATCH_MV_COMP_MAX     2
+
+struct PhasmBypassOverrides {
+  uint8_t coeff_sign      [PHASM_SCRATCH_BLOCK_CAT_COUNT]
+                          [PHASM_SCRATCH_SUB_BLOCK_MAX]
+                          [PHASM_SCRATCH_COEFF_IDX_MAX];
+  uint8_t coeff_suffix_lsb[PHASM_SCRATCH_BLOCK_CAT_COUNT]
+                          [PHASM_SCRATCH_SUB_BLOCK_MAX]
+                          [PHASM_SCRATCH_COEFF_IDX_MAX];
+  uint8_t mvd_sign        [PHASM_SCRATCH_PARTITION_MAX]
+                          [PHASM_SCRATCH_MV_COMP_MAX];
+  uint8_t mvd_suffix_lsb  [PHASM_SCRATCH_PARTITION_MAX]
+                          [PHASM_SCRATCH_MV_COMP_MAX];
+};
+
+static PhasmBypassOverrides g_phasm_bypass_overrides;
+
+/* Internal helper: validate slot indices for the given domain and
+ * return a pointer to the slot byte, or nullptr if any index is out
+ * of range. Used by both the populate side (`phasm_set_bypass_override`)
+ * and the read side (`phasm_apply_bypass_bin_override`). */
+static uint8_t* phasm_scratch_slot(uint8_t domain,
+                                    const PhasmStegoPos* pos) {
+  if (pos == nullptr) return nullptr;
+  switch (domain) {
+    case PHASM_DOMAIN_COEFF_SIGN:
+    case PHASM_DOMAIN_COEFF_SUFFIX_LSB: {
+      if (pos->block_cat >= PHASM_SCRATCH_BLOCK_CAT_COUNT) return nullptr;
+      if (pos->sub_block >= PHASM_SCRATCH_SUB_BLOCK_MAX)   return nullptr;
+      if (pos->coeff_idx >= PHASM_SCRATCH_COEFF_IDX_MAX)   return nullptr;
+      if (domain == PHASM_DOMAIN_COEFF_SIGN) {
+        return &g_phasm_bypass_overrides
+                  .coeff_sign[pos->block_cat][pos->sub_block][pos->coeff_idx];
+      } else {
+        return &g_phasm_bypass_overrides
+                  .coeff_suffix_lsb[pos->block_cat][pos->sub_block][pos->coeff_idx];
+      }
+    }
+    case PHASM_DOMAIN_MVD_SIGN:
+    case PHASM_DOMAIN_MVD_SUFFIX_LSB: {
+      if (pos->partition_idx >= PHASM_SCRATCH_PARTITION_MAX) return nullptr;
+      if (pos->mv_component >= PHASM_SCRATCH_MV_COMP_MAX)    return nullptr;
+      if (domain == PHASM_DOMAIN_MVD_SIGN) {
+        return &g_phasm_bypass_overrides
+                  .mvd_sign[pos->partition_idx][pos->mv_component];
+      } else {
+        return &g_phasm_bypass_overrides
+                  .mvd_suffix_lsb[pos->partition_idx][pos->mv_component];
+      }
+    }
+    default:
+      return nullptr;
+  }
+}
+
+void phasm_reset_bypass_overrides(void) {
+  /* Zero-init = "no override" across the whole table. memset is
+   * cheap (~2.6 KB, fits in one cache line per array element row). */
+  std::memset(&g_phasm_bypass_overrides, 0, sizeof(g_phasm_bypass_overrides));
+}
+
+/* Populate a single slot. Caller passes the OVERRIDE BIN (0 or 1);
+ * this function stores it as 1/2 in the scratch byte (0 reserved for
+ * "no override"). Out-of-range domains, positions, or override bins
+ * are silently no-op'd — populates that can't fit the dense table
+ * just stay un-overridden (defensive, matches the pre-4.5 hook
+ * helpers' behaviour of silently refusing illegal mutations). */
+void phasm_set_bypass_override(uint8_t domain,
+                                const PhasmStegoPos* pos,
+                                int override_bin) {
+  if (override_bin != 0 && override_bin != 1) return;
+  uint8_t* slot = phasm_scratch_slot(domain, pos);
+  if (slot == nullptr) return;
+  *slot = (uint8_t)(override_bin + 1);  /* 0→1, 1→2 */
+}
+
+/* Phase 4.5.a wire-up: read scratch at emit time. */
 int phasm_apply_bypass_bin_override (uint8_t domain,
                                       const PhasmStegoPos* pos,
                                       int orig_bin) {
-  (void)domain;
-  (void)pos;
-  return orig_bin;
+  uint8_t* slot = phasm_scratch_slot(domain, pos);
+  if (slot == nullptr) return orig_bin;
+  const uint8_t v = *slot;
+  if (v == 0) return orig_bin;
+  return (int)(v - 1);  /* 1→0, 2→1 */
 }
 
 }  // extern "C"

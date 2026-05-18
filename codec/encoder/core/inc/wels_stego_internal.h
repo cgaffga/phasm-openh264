@@ -376,6 +376,34 @@ void phasm_stash_mv_clean_mc_chroma_slot(int32_t iUV,
                                           int32_t w, int32_t h,
                                           const uint8_t* src, int32_t src_stride);
 
+/* ---------------------------------------------------------------------
+ * Phase 4.5 (#538) — bypass-bin scratch table.
+ *
+ * Dense per-MB storage for stego bin overrides, read at CABAC emit
+ * time by `phasm_apply_bypass_bin_override` (in wels_stego.h public
+ * ABI) and populated by the Phase 4.5.b+ migrations of the mutating
+ * hooks (apply_coeff_hooks_to_level / phasm_apply_mvd_hooks /
+ * phasm_apply_h_partition_hook).
+ *
+ *   - `phasm_reset_bypass_overrides`: clear all slots back to "no
+ *     override". Intended call site: top of each per-MB encode
+ *     function, before any populate hook can fire. Wired in 4.5.b.
+ *
+ *   - `phasm_set_bypass_override(domain, pos, bin)`: write a single
+ *     override bin (0 or 1) at the slot keyed by (domain + pos's
+ *     domain-relevant fields). Out-of-range domains / positions /
+ *     bins are silently no-op'd. Called from the migrated hook
+ *     helpers; not currently called from outside wels_stego.cpp,
+ *     but declared here so future cross-TU callers can find it.
+ *
+ * Pre-4.5.b: no callers populate, scratch stays zero-init, and the
+ * Phase 4.2-4.4 emit-side hooks return orig_bin unconditionally.
+ * Byte-identical to the Phase 4.4 ship. */
+void phasm_reset_bypass_overrides(void);
+void phasm_set_bypass_override(uint8_t domain,
+                                const PhasmStegoPos* pos,
+                                int override_bin);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
