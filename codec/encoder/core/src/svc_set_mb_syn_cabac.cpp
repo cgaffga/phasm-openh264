@@ -40,6 +40,7 @@
 #include "svc_set_mb_syn.h"
 #include "set_mb_syn_cabac.h"
 #include "svc_enc_golomb.h"
+#include "wels_stego_internal.h"  /* phasm_apply_bypass_bin_override (Phase 4.2) */
 
 using namespace WelsEnc;
 
@@ -512,7 +513,39 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
         WelsCabacEncodeDecision (pCabacCtx, iCtx, 0);
         iCtx1 += iNumAbsLevelGt1 == 0;
       }
-      WelsCabacEncodeBypassOne (pCabacCtx, iLevel[iNonZeroIdx] < 0);
+      /* #538 Phase 4.2 — wire-only CoeffSign override hook.
+       *
+       * Stub-only at this point (`phasm_apply_bypass_bin_override`
+       * returns `orig_bin` unconditionally), so this is byte-identical
+       * to the previous unconditional `WelsCabacEncodeBypassOne`. Phase
+       * 4.5 wires the scratch-table backing that lets this call return
+       * an override.
+       *
+       * Indexing caveat (TODO Phase 4.5): pos.sub_block + pos.coeff_idx
+       * here use the CABAC-emit-time iIdx + iNonZeroIdx, which is NOT
+       * the same scheme the populate-side mutation hooks use (those
+       * pass coeff_idx_scanned = AC scan position). The scratch table
+       * design in 4.5 must reconcile these — either map at the populate
+       * site or canonicalise via a PositionKey. Until then the
+       * mismatch is harmless because the stub doesn't read pos. */
+      {
+        PhasmStegoPos phasm_pos;
+        phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+        phasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
+        phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
+        phasm_pos.partition_idx = 0;
+        phasm_pos.sub_block     = (uint8_t)iIdx;
+        phasm_pos.coeff_idx     = (uint8_t)iNonZeroIdx;
+        phasm_pos.block_cat     = (uint8_t)eCtxBlockCat;
+        phasm_pos.ref_idx       = 0xff;
+        phasm_pos.mv_component  = 0xff;
+        phasm_pos.domain        = (uint8_t)PHASM_DOMAIN_COEFF_SIGN;
+        phasm_pos._reserved     = 0;
+        const int phasm_orig_sign = (iLevel[iNonZeroIdx] < 0) ? 1 : 0;
+        const int phasm_bin = phasm_apply_bypass_bin_override (
+            (uint8_t)PHASM_DOMAIN_COEFF_SIGN, &phasm_pos, phasm_orig_sign);
+        WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
+      }
     } while (iNonZeroIdx > 0);
 
   } else {
