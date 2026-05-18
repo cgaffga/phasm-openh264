@@ -2155,232 +2155,210 @@ bool WelsMdFirstIntraMode (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurMb, 
   return false;
 }
 
+/* #533.3 Stage 2B.b — Pass-2 REPLAY override at the Refinement→Encode
+ * boundary inside WelsMdInterSecondaryModesEnc. Aux mode-decision
+ * functions (BGD, SCDP, JudgePskip, P16x16, FirstIntraMode) have all
+ * run their natural code path by the time this fires, so their state
+ * updates (BGD/SCDP/SAD stats consumed by future-frame RDO) are
+ * intact. The override only reshapes pCurMb state + pMemPred buffers
+ * to match the cached decision before residual emit.
+ *
+ * Returns:
+ *   0 — no override fired; caller runs WelsMdInterEncode normally.
+ *   1 — cached decision was SKIP; helper called WelsMdInterDecidedPskip
+ *       directly. Caller must skip both InterEncode and DoubleCheckPskip.
+ *   2 — cached decision was inter; helper updated pCurMb + pMemPred.
+ *       Caller runs InterEncode but must skip DoubleCheckPskip (which
+ *       could undo our override on uiCbp==0 boundary cases). */
+static int phasm_replay_inter_override (sWelsEncCtx* pEncCtx, SSlice* pSlice,
+                                         SMB* pCurMb, SMbCache* pMbCache) {
+  if (PhasmStegoGetPassMode() != PHASM_PASS_REPLAY) return 0;
+  PhasmStegoMbDecision d;
+  if (!phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
+                                    (uint16_t)pCurMb->iMbY, &d)) return 0;
+
+  SDqLayer* pCurDqLayer = pEncCtx->pCurDqLayer;
+
+  if (d.ui_mb_type & MB_TYPE_SKIP) {
+    WelsMdInterDecidedPskip (pEncCtx, pSlice, pCurMb, pMbCache);
+    return 1;
+  }
+
+  /* Intra bits short-circuit out of inter REPLAY (handled at
+   * WelsMdIntraMb in Stage 2C, not here). */
+  const bool phasm_replay_is_intra = (d.ui_mb_type & (MB_TYPE_INTRA4x4
+                                                      | MB_TYPE_INTRA16x16
+                                                      | MB_TYPE_INTRA8x8
+                                                      | MB_TYPE_INTRA_BL
+                                                      | MB_TYPE_INTRA_PCM)) != 0;
+  if (phasm_replay_is_intra) return 0;
+
+  SWelsFuncPtrList* pFunc  = pEncCtx->pFuncList;
+  uint8_t* pRefLuma        = pMbCache->SPicData.pRefMb[0];
+  uint8_t* pRefCb          = pMbCache->SPicData.pRefMb[1];
+  uint8_t* pRefCr          = pMbCache->SPicData.pRefMb[2];
+  const int32_t iLineSizeY  = pCurDqLayer->pRefPic->iLineSize[0];
+  const int32_t iLineSizeUV = pCurDqLayer->pRefPic->iLineSize[1];
+
+  /* Stage 2A — P_16x16 (single MV / single ref).
+   *
+   * McLuma_c / McChroma_c require the caller to PRE-SHIFT pSrc by the
+   * integer-pel component of the MV; the funcs only use the sub-pel
+   * part for fractional interpolation. Matches WelsMdPSkipEnc pattern.
+   * Luma integer shift = (mvY>>2)*stride + (mvX>>2); chroma is by 1/8
+   * so >>3 on each component. */
+  if (d.ui_mb_type & MB_TYPE_16x16) {
+    SMVUnitXY sMv;
+    sMv.iMvX = (int16_t)d.mv_x[0][0];
+    sMv.iMvY = (int16_t)d.mv_y[0][0];
+    const int8_t kiRef = (int8_t)d.ref_idx[0][0];
+
+    const int32_t kiLumaStride = (sMv.iMvY >> 2) * iLineSizeY + (sMv.iMvX >> 2);
+    const int32_t kiChromaStride = (sMv.iMvY >> 3) * iLineSizeUV + (sMv.iMvX >> 3);
+    pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + kiLumaStride, iLineSizeY,
+                                 pMbCache->pMemPredLuma, 16,
+                                 sMv.iMvX, sMv.iMvY, 16, 16);
+    pFunc->sMcFuncs.pMcChromaFunc (pRefCb + kiChromaStride, iLineSizeUV,
+                                   pMbCache->pMemPredChroma, 8,
+                                   sMv.iMvX, sMv.iMvY, 8, 8);
+    pFunc->sMcFuncs.pMcChromaFunc (pRefCr + kiChromaStride, iLineSizeUV,
+                                   pMbCache->pMemPredChroma + 64, 8,
+                                   sMv.iMvX, sMv.iMvY, 8, 8);
+
+    pCurMb->uiMbType  = MB_TYPE_16x16;
+    pCurMb->sP16x16Mv = sMv;
+    SMVUnitXY sMvp;
+    PredMv (&pMbCache->sMvComponents, 0, 4, kiRef, &sMvp);
+    pMbCache->sMbMvp[0] = sMvp;
+    UpdateP16x16MotionInfo (pMbCache, pCurMb, kiRef, &sMv);
+    return 2;
+  }
+
+  /* Stage 2B.16x8 — two horizontal 16x8 partitions.
+   * pCurMb->sMv is raster-ordered; iIdx is sub-MB-count scan, so the
+   * cache slot for partition i's broadcast MV is
+   * mv_x[g_kuiMbCountScan4Idx[iIdx]]. For 16x8 that's coincidentally
+   * identity ({0, 8}); using the mapped form keeps symmetry with
+   * 8x16 / 8x8 below. */
+  if (d.ui_mb_type & MB_TYPE_16x8) {
+    for (int32_t i = 0; i < 2; i++) {
+      const int32_t iIdx = i << 3;
+      const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iIdx];
+      const int32_t iRefSubIdx = i << 1;
+      SMVUnitXY sMv;
+      sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
+      sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
+      const int8_t kiRef = (int8_t)d.ref_idx[iRefSubIdx][0];
+
+      const int32_t kiLumaStride = (sMv.iMvY >> 2) * iLineSizeY + (sMv.iMvX >> 2);
+      const int32_t kiChromaStride = (sMv.iMvY >> 3) * iLineSizeUV + (sMv.iMvX >> 3);
+      pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + (i << 3) * iLineSizeY + kiLumaStride,
+                                   iLineSizeY,
+                                   pMbCache->pMemPredLuma + (i << 3) * 16,
+                                   16, sMv.iMvX, sMv.iMvY, 16, 8);
+      const int32_t cRow = i << 2;
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cRow * iLineSizeUV + kiChromaStride, iLineSizeUV,
+                                     pMbCache->pMemPredChroma + cRow * 8,
+                                     8, sMv.iMvX, sMv.iMvY, 8, 4);
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cRow * iLineSizeUV + kiChromaStride, iLineSizeUV,
+                                     pMbCache->pMemPredChroma + 64 + cRow * 8,
+                                     8, sMv.iMvX, sMv.iMvY, 8, 4);
+      SMVUnitXY sMvp;
+      PredInter16x8Mv (pMbCache, iIdx, kiRef, &sMvp);
+      pMbCache->sMbMvp[i] = sMvp;
+      UpdateP16x8MotionInfo (pMbCache, pCurMb, iIdx, kiRef, &sMv);
+    }
+    pCurMb->uiMbType = MB_TYPE_16x8;
+    return 2;
+  }
+
+  /* Stage 2B.8x16 — two vertical 8x16 partitions. */
+  if (d.ui_mb_type & MB_TYPE_8x16) {
+    for (int32_t i = 0; i < 2; i++) {
+      const int32_t iIdx = i << 2;
+      const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iIdx];
+      SMVUnitXY sMv;
+      sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
+      sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
+      const int8_t kiRef = (int8_t)d.ref_idx[i][0];
+
+      const int32_t kiLumaStride = (sMv.iMvY >> 2) * iLineSizeY + (sMv.iMvX >> 2);
+      const int32_t kiChromaStride = (sMv.iMvY >> 3) * iLineSizeUV + (sMv.iMvX >> 3);
+      pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + (i << 3) + kiLumaStride, iLineSizeY,
+                                   pMbCache->pMemPredLuma + (i << 3),
+                                   16, sMv.iMvX, sMv.iMvY, 8, 16);
+      const int32_t cCol = i << 2;
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cCol + kiChromaStride, iLineSizeUV,
+                                     pMbCache->pMemPredChroma + cCol,
+                                     8, sMv.iMvX, sMv.iMvY, 4, 8);
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cCol + kiChromaStride, iLineSizeUV,
+                                     pMbCache->pMemPredChroma + 64 + cCol,
+                                     8, sMv.iMvX, sMv.iMvY, 4, 8);
+      SMVUnitXY sMvp;
+      PredInter8x16Mv (pMbCache, iIdx, kiRef, &sMvp);
+      pMbCache->sMbMvp[i] = sMvp;
+      update_P8x16_motion_info (pMbCache, pCurMb, iIdx, kiRef, &sMv);
+    }
+    pCurMb->uiMbType = MB_TYPE_8x16;
+    return 2;
+  }
+
+  /* Stage 2B.8x8 — four 8x8 sub-MBs, uniform SUB_MB_TYPE_8x8 only.
+   * Mixed 8x4 / 4x8 / 4x4 sub_mb_types fall through to natural choice. */
+  if (d.ui_mb_type & MB_TYPE_8x8) {
+    const bool phasm_replay_all_8x8 =
+        (d.sub_mb_type[0] == SUB_MB_TYPE_8x8)
+        && (d.sub_mb_type[1] == SUB_MB_TYPE_8x8)
+        && (d.sub_mb_type[2] == SUB_MB_TYPE_8x8)
+        && (d.sub_mb_type[3] == SUB_MB_TYPE_8x8);
+    if (!phasm_replay_all_8x8) return 0;
+
+    pMbCache->sMvComponents.iRefIndexCache[9]  = REF_NOT_AVAIL;
+    pMbCache->sMvComponents.iRefIndexCache[21] = REF_NOT_AVAIL;
+    for (int32_t i = 0; i < 4; i++) {
+      const int32_t iBlk8Idx = i << 2;
+      const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iBlk8Idx];
+      const int32_t lCol = (i & 1) << 3;
+      const int32_t lRow = (i >> 1) << 3;
+      SMVUnitXY sMv;
+      sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
+      sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
+      const int8_t kiRef = (int8_t)d.ref_idx[i][0];
+
+      pCurMb->uiSubMbType[i] = SUB_MB_TYPE_8x8;
+      pCurMb->pRefIndex[i]   = kiRef;
+
+      const int32_t kiLumaStride = (sMv.iMvY >> 2) * iLineSizeY + (sMv.iMvX >> 2);
+      const int32_t kiChromaStride = (sMv.iMvY >> 3) * iLineSizeUV + (sMv.iMvX >> 3);
+      pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + lRow * iLineSizeY + lCol + kiLumaStride,
+                                   iLineSizeY,
+                                   pMbCache->pMemPredLuma + lRow * 16 + lCol,
+                                   16, sMv.iMvX, sMv.iMvY, 8, 8);
+      const int32_t cCol = (i & 1) << 2;
+      const int32_t cRow = (i >> 1) << 2;
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cRow * iLineSizeUV + cCol + kiChromaStride,
+                                     iLineSizeUV,
+                                     pMbCache->pMemPredChroma + cRow * 8 + cCol,
+                                     8, sMv.iMvX, sMv.iMvY, 4, 4);
+      pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cRow * iLineSizeUV + cCol + kiChromaStride,
+                                     iLineSizeUV,
+                                     pMbCache->pMemPredChroma + 64 + cRow * 8 + cCol,
+                                     8, sMv.iMvX, sMv.iMvY, 4, 4);
+      SMVUnitXY sMvp;
+      PredMv (&pMbCache->sMvComponents, iBlk8Idx, 2, kiRef, &sMvp);
+      pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk8Idx]] = sMvp;
+      UpdateP8x8MotionInfo (pMbCache, pCurMb, iBlk8Idx, kiRef, &sMv);
+    }
+    pCurMb->uiMbType = MB_TYPE_8x8;
+    return 2;
+  }
+
+  return 0;
+}
+
 void WelsMdInterMb (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SSlice* pSlice, SMB* pCurMb, SMbCache* pUnused) {
   SDqLayer* pCurDqLayer             = pEncCtx->pCurDqLayer;
   SMbCache* pMbCache                = &pSlice->sMbCacheInfo;
-
-  /* #533.3 Stages 1+2A+2B — Pass-2 REPLAY override.
-   *
-   * If REPLAY mode is active and the consumer has a cached decision
-   * for this MB, short-circuit RDO/ME and replay the cached choice.
-   *
-   *   Stage 1  — MB_TYPE_SKIP (P-Skip).
-   *   Stage 2A — MB_TYPE_16x16 (P_16x16, single MV, single ref).
-   *   Stage 2B — MB_TYPE_16x8 / 8x16 / 8x8 (uniform SUB_MB_TYPE_8x8).
-   *
-   * Intra mb_types and 8x8 with 8x4/4x8/4x4 sub-MBs fall through to
-   * normal mode decision until Stages 2C/2B.b land. Replay derives
-   * MVD/PMV/CBP from the same neighbour state Pass-1 saw, so the
-   * emit is byte-identical to natural mode-decision output. */
-  if (PhasmStegoGetPassMode() == PHASM_PASS_REPLAY) {
-    PhasmStegoMbDecision d;
-    if (phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
-                                     (uint16_t)pCurMb->iMbY, &d)) {
-      if (d.ui_mb_type & MB_TYPE_SKIP) {
-        WelsMdInterDecidedPskip (pEncCtx, pSlice, pCurMb, pMbCache);
-        return;
-      }
-      /* Intra bits short-circuit out of inter REPLAY entirely. WelsMdIntraMb
-       * (Stage 2C) is where I_* gets replayed. */
-      const bool phasm_replay_is_intra = (d.ui_mb_type & (MB_TYPE_INTRA4x4
-                                                          | MB_TYPE_INTRA16x16
-                                                          | MB_TYPE_INTRA8x8
-                                                          | MB_TYPE_INTRA_BL
-                                                          | MB_TYPE_INTRA_PCM)) != 0;
-      /* Stage 2A — P_16x16 (single-MV / single-ref). Pattern mirrors
-       * WelsMdBackgroundMbEnc non-skip flow. */
-      if ((d.ui_mb_type & MB_TYPE_16x16) && !phasm_replay_is_intra) {
-        SMVUnitXY sMv;
-        sMv.iMvX = (int16_t)d.mv_x[0][0];
-        sMv.iMvY = (int16_t)d.mv_y[0][0];
-        const int8_t kiRef = (int8_t)d.ref_idx[0][0];
-
-        SWelsFuncPtrList* pFunc  = pEncCtx->pFuncList;
-        uint8_t* pRefLuma        = pMbCache->SPicData.pRefMb[0];
-        uint8_t* pRefCb          = pMbCache->SPicData.pRefMb[1];
-        uint8_t* pRefCr          = pMbCache->SPicData.pRefMb[2];
-        const int32_t iLineSizeY  = pCurDqLayer->pRefPic->iLineSize[0];
-        const int32_t iLineSizeUV = pCurDqLayer->pRefPic->iLineSize[1];
-
-        pFunc->sMcFuncs.pMcLumaFunc (pRefLuma, iLineSizeY,
-                                     pMbCache->pMemPredLuma, 16,
-                                     sMv.iMvX, sMv.iMvY, 16, 16);
-        pFunc->sMcFuncs.pMcChromaFunc (pRefCb, iLineSizeUV,
-                                       pMbCache->pMemPredChroma, 8,
-                                       sMv.iMvX, sMv.iMvY, 8, 8);
-        pFunc->sMcFuncs.pMcChromaFunc (pRefCr, iLineSizeUV,
-                                       pMbCache->pMemPredChroma + 64, 8,
-                                       sMv.iMvX, sMv.iMvY, 8, 8);
-
-        pCurMb->uiMbType  = MB_TYPE_16x16;
-        pCurMb->sP16x16Mv = sMv;
-        SMVUnitXY sMvp;
-        PredMv (&pMbCache->sMvComponents, 0, 4, kiRef, &sMvp);
-        pMbCache->sMbMvp[0] = sMvp;
-        UpdateP16x16MotionInfo (pMbCache, pCurMb, kiRef, &sMv);
-
-        WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
-        return;
-      }
-
-      /* Stage 2B — partitioned. Common state for all three branches. */
-      if (!phasm_replay_is_intra && (d.ui_mb_type & (MB_TYPE_16x8
-                                                     | MB_TYPE_8x16
-                                                     | MB_TYPE_8x8))) {
-        SWelsFuncPtrList* pFunc  = pEncCtx->pFuncList;
-        uint8_t* pRefLuma        = pMbCache->SPicData.pRefMb[0];
-        uint8_t* pRefCb          = pMbCache->SPicData.pRefMb[1];
-        uint8_t* pRefCr          = pMbCache->SPicData.pRefMb[2];
-        const int32_t iLineSizeY  = pCurDqLayer->pRefPic->iLineSize[0];
-        const int32_t iLineSizeUV = pCurDqLayer->pRefPic->iLineSize[1];
-
-        /* Stage 2B.16x8 — two horizontal 16x8 partitions.
-         * Partition i ∈ {0,1}: iIdx = i*8 = sub-MB-count scan start,
-         * luma block top-left = (0, i*8), chroma top-left = (0, i*4).
-         * pCurMb->sMv is raster-ordered, so the cache slot for the
-         * partition's broadcast MV is mv_x[g_kuiMbCountScan4Idx[iIdx]].
-         * For 16x8 that's coincidentally {0, 8} (identity), but we use
-         * the same form as 8x16 / 8x8 for symmetry. */
-        if (d.ui_mb_type & MB_TYPE_16x8) {
-          for (int32_t i = 0; i < 2; i++) {
-            const int32_t iIdx = i << 3;          /* 0, 8 */
-            const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iIdx];
-            const int32_t iRefSubIdx = i << 1;    /* 0, 2 */
-            SMVUnitXY sMv;
-            sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
-            sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
-            const int8_t kiRef = (int8_t)d.ref_idx[iRefSubIdx][0];
-
-            /* Luma: 16×8 partition at (0, i*8), stride 16. */
-            pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + (i << 3) * iLineSizeY,
-                                         iLineSizeY,
-                                         pMbCache->pMemPredLuma + (i << 3) * 16,
-                                         16,
-                                         sMv.iMvX, sMv.iMvY, 16, 8);
-            /* Chroma: 8×4 partition at (0, i*4), stride 8. */
-            const int32_t cRow = i << 2;
-            pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cRow * iLineSizeUV,
-                                           iLineSizeUV,
-                                           pMbCache->pMemPredChroma + cRow * 8,
-                                           8, sMv.iMvX, sMv.iMvY, 8, 4);
-            pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cRow * iLineSizeUV,
-                                           iLineSizeUV,
-                                           pMbCache->pMemPredChroma + 64 + cRow * 8,
-                                           8, sMv.iMvX, sMv.iMvY, 8, 4);
-
-            SMVUnitXY sMvp;
-            PredInter16x8Mv (pMbCache, iIdx, kiRef, &sMvp);
-            pMbCache->sMbMvp[i] = sMvp;
-            UpdateP16x8MotionInfo (pMbCache, pCurMb, iIdx, kiRef, &sMv);
-          }
-          pCurMb->uiMbType = MB_TYPE_16x8;
-          WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
-          return;
-        }
-
-        /* Stage 2B.8x16 — two vertical 8x16 partitions.
-         * Partition i ∈ {0,1}: iIdx = i*4 = sub-MB-count scan start
-         * (NOT raster). Luma top-left = (i*8, 0), chroma = (i*4, 0).
-         * Cache mv slot is g_kuiMbCountScan4Idx[iIdx] = {0, 2} —
-         * right partition reads mv_x[2] (raster position (8,0)),
-         * NOT mv_x[4] which would land in the left half. */
-        if (d.ui_mb_type & MB_TYPE_8x16) {
-          for (int32_t i = 0; i < 2; i++) {
-            const int32_t iIdx = i << 2;          /* 0, 4 */
-            const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iIdx];
-            SMVUnitXY sMv;
-            sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
-            sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
-            const int8_t kiRef = (int8_t)d.ref_idx[i][0];
-
-            /* Luma: 8×16 partition at (i*8, 0), stride 16. */
-            pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + (i << 3),
-                                         iLineSizeY,
-                                         pMbCache->pMemPredLuma + (i << 3),
-                                         16,
-                                         sMv.iMvX, sMv.iMvY, 8, 16);
-            /* Chroma: 4×8 partition at (i*4, 0), stride 8. */
-            const int32_t cCol = i << 2;
-            pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cCol, iLineSizeUV,
-                                           pMbCache->pMemPredChroma + cCol,
-                                           8, sMv.iMvX, sMv.iMvY, 4, 8);
-            pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cCol, iLineSizeUV,
-                                           pMbCache->pMemPredChroma + 64 + cCol,
-                                           8, sMv.iMvX, sMv.iMvY, 4, 8);
-
-            SMVUnitXY sMvp;
-            PredInter8x16Mv (pMbCache, iIdx, kiRef, &sMvp);
-            pMbCache->sMbMvp[i] = sMvp;
-            update_P8x16_motion_info (pMbCache, pCurMb, iIdx, kiRef, &sMv);
-          }
-          pCurMb->uiMbType = MB_TYPE_8x16;
-          WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
-          return;
-        }
-
-        /* Stage 2B.8x8 — four 8x8 sub-MBs, uniform SUB_MB_TYPE_8x8 only.
-         * Sub-MB i (TL/TR/BL/BR): iBlk8Idx = i*4 = first 4x4 in sub-MB.
-         * 8x4 / 4x8 / 4x4 sub_mb_types fall through to natural decision. */
-        if (d.ui_mb_type & MB_TYPE_8x8) {
-          const bool phasm_replay_all_8x8 =
-              (d.sub_mb_type[0] == SUB_MB_TYPE_8x8)
-              && (d.sub_mb_type[1] == SUB_MB_TYPE_8x8)
-              && (d.sub_mb_type[2] == SUB_MB_TYPE_8x8)
-              && (d.sub_mb_type[3] == SUB_MB_TYPE_8x8);
-          if (phasm_replay_all_8x8) {
-            /* Mirror natural-flow neighbour-cache init at line ~1938. */
-            pMbCache->sMvComponents.iRefIndexCache[9]  = REF_NOT_AVAIL;
-            pMbCache->sMvComponents.iRefIndexCache[21] = REF_NOT_AVAIL;
-            for (int32_t i = 0; i < 4; i++) {
-              const int32_t iBlk8Idx = i << 2;         /* 0, 4, 8, 12 */
-              /* iBlk8Idx is sub-MB-count scan; raster sMv index is
-               * g_kuiMbCountScan4Idx[iBlk8Idx] = {0, 2, 8, 10}. The
-               * TR sub-MB (i=1) reads mv_x[2] not mv_x[4], and the BR
-               * sub-MB (i=3) reads mv_x[10] not mv_x[12]. */
-              const int32_t iMvRasterIdx = g_kuiMbCountScan4Idx[iBlk8Idx];
-              const int32_t lCol = (i & 1) << 3;       /* 0, 8, 0, 8 */
-              const int32_t lRow = (i >> 1) << 3;      /* 0, 0, 8, 8 */
-              SMVUnitXY sMv;
-              sMv.iMvX = (int16_t)d.mv_x[iMvRasterIdx][0];
-              sMv.iMvY = (int16_t)d.mv_y[iMvRasterIdx][0];
-              const int8_t kiRef = (int8_t)d.ref_idx[i][0];
-
-              pCurMb->uiSubMbType[i] = SUB_MB_TYPE_8x8;
-              pCurMb->pRefIndex[i]   = kiRef;
-
-              /* Luma: 8×8 sub-MB. */
-              pFunc->sMcFuncs.pMcLumaFunc (pRefLuma + lRow * iLineSizeY + lCol,
-                                           iLineSizeY,
-                                           pMbCache->pMemPredLuma + lRow * 16 + lCol,
-                                           16,
-                                           sMv.iMvX, sMv.iMvY, 8, 8);
-              /* Chroma: 4×4 sub-MB. */
-              const int32_t cCol = (i & 1) << 2;
-              const int32_t cRow = (i >> 1) << 2;
-              pFunc->sMcFuncs.pMcChromaFunc (pRefCb + cRow * iLineSizeUV + cCol,
-                                             iLineSizeUV,
-                                             pMbCache->pMemPredChroma + cRow * 8 + cCol,
-                                             8, sMv.iMvX, sMv.iMvY, 4, 4);
-              pFunc->sMcFuncs.pMcChromaFunc (pRefCr + cRow * iLineSizeUV + cCol,
-                                             iLineSizeUV,
-                                             pMbCache->pMemPredChroma + 64 + cRow * 8 + cCol,
-                                             8, sMv.iMvX, sMv.iMvY, 4, 4);
-
-              SMVUnitXY sMvp;
-              PredMv (&pMbCache->sMvComponents, iBlk8Idx, 2, kiRef, &sMvp);
-              pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk8Idx]] = sMvp;
-              UpdateP8x8MotionInfo (pMbCache, pCurMb, iBlk8Idx, kiRef, &sMv);
-            }
-            pCurMb->uiMbType = MB_TYPE_8x8;
-            WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
-            return;
-          }
-          /* Mixed 8x4/4x8/4x4 sub_mb_types: fall through (Stage 2B.b). */
-        }
-      }
-      /* Intra and unhandled types fall through (Stages 2C / 2B.b). */
-    }
-  }
 
   const uint32_t kuiNeighborAvail   = pCurMb->uiNeighborAvail;
   const int32_t kiMbWidth           = pCurDqLayer->iMbWidth;
@@ -2535,10 +2513,27 @@ void WelsMdInterSecondaryModesEnc (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SSlic
     //refinement for inter type
     WelsMdInterMbRefinement (pEncCtx, pWelsMd, pCurMb, pMbCache);
 
+    /* #533.3 Stage 2B.b — Pass-2 REPLAY override (post-Refinement,
+     * pre-InterEncode). At this point, all aux mode-decision functions
+     * have already run (BGD/SCDP/JudgePskip/P16x16/FirstIntraMode) and
+     * updated their state. The override only reshapes pCurMb state +
+     * pMemPred buffers to match the cached decision before residual
+     * emit, so subsequent frames see the correct auxiliary state. */
+    const int phasm_replay_action =
+        phasm_replay_inter_override (pEncCtx, pSlice, pCurMb, pMbCache);
+    if (phasm_replay_action == 1) {
+      /* Cached SKIP — helper already called WelsMdInterDecidedPskip. */
+      return;
+    }
+
     //step 7: invoke encoding
     WelsMdInterEncode (pEncCtx, pSlice, pCurMb, pMbCache);
 
     //step 8: double check Pskip
+    /* DoubleCheckPskip converts P_16x16 → SKIP when uiCbp==0 + MV ==
+     * PredSkipMv + ref==0. Pass-1 ran it; Pass-2 must also run it for
+     * state parity (the conversion result is what's in the cache,
+     * since capture fires AFTER DoubleCheck). */
     WelsMdInterDoubleCheckPskip (pCurMb, pMbCache);
   }
 }
