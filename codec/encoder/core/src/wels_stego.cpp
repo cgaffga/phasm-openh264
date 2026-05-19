@@ -647,9 +647,17 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
    * Skip the MV-mutation tail (pskip-collision check is moot — we
    * didn't change the MV — and sMvList stays in sync with mv_in). */
   if (wire_only) {
+    /* #549 Bug 3 fix (2026-05-19): always return 0 in wire_only=1
+     * regardless of wire_only_any_override. Closed-loop walker test
+     * `pass2_walker_sees_mvdsign_only_real_carplane_480p` confirmed:
+     * 105 MvdSign overrides → +1817 CS positions in Pass 2 (cascade).
+     * Returning 1 signals the caller (phasm_apply_h_partition_hook in
+     * svc_base_layer_md.cpp) to do redundant MC via pMcLumaFunc, which
+     * perturbs encoder state even though MV stayed clean. Slice override
+     * counter increment is kept (C.9.2 deblock-skip optimization gate)
+     * but the return value no longer triggers downstream side effects. */
     if (wire_only_any_override) {
-      phasm_inc_slice_override_count();  // C.9.2 (#450)
-      return 1;
+      phasm_inc_slice_override_count();  // C.9.2 (#450) — gate kept
     }
     return 0;
   }
