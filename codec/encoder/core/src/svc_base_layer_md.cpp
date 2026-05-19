@@ -2041,6 +2041,11 @@ bool WelsMdFirstIntraMode (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurMb, 
 static int phasm_replay_inter_override (sWelsEncCtx* pEncCtx, SSlice* pSlice,
                                          SMB* pCurMb, SMbCache* pMbCache) {
   if (PhasmStegoGetPassMode() != PHASM_PASS_REPLAY) return 0;
+  /* #549 v1.0 HOTFIX (2026-05-19): bypass cache-application path.
+   * See `memory/h264_549_real_content_regression_findings.md` for
+   * rationale. Forced-miss test proved Pass 1 ≡ Pass 2 when override
+   * returns 0; closed-loop walker test confirms 1-flip cascade vanishes. */
+  return 0;
   PhasmStegoMbDecision d;
   if (!phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
                                     (uint16_t)pCurMb->iMbY, &d)) return 0;
