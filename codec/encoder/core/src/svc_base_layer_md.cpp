@@ -64,10 +64,14 @@ namespace WelsEnc {
  *    automatically.
  *
  * Position descriptor:
- *  - partition_idx encodes the 4x4-block index of the partition's
- *    top-left sub-block within the MB (0..15). The phasm-side callback
- *    disambiguates partition shape via the MB type parsed from the
- *    cover bitstream. */
+ *  - partition_idx: H.264-spec partition_id = mbPartIdx*4 + subMbPartIdx
+ *    (per #549 Bug 5, 2026-05-19). The walker emits the same value when
+ *    decoding the cover, so encoder & walker share a single key. The
+ *    phasm-side callback disambiguates partition shape via the MB type
+ *    parsed from the cover bitstream.
+ *  - iIdx (separate argument): raster 4x4 index of the partition's
+ *    top-left sub-block (0..15). Used internally for pixel addressing
+ *    via g_kuiSmb4AddrIn256[iIdx]. */
 static inline void phasm_apply_h_partition_hook(
     SDqLayer* pCurDqLayer,
     SWelsFuncPtrList* pFunc,
@@ -1764,10 +1768,15 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_STRIDE_BLK8;
       PredInter16x8Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe16x8[i], &sMeRefine, 16, 8);
-      /* phasm-stego HOOK-H2: P_16x8 MVD post-refine override per partition. */
+      /* phasm-stego HOOK-H2: P_16x8 MVD post-refine override per partition.
+       * #549 Bug 5 (2026-05-19): partition_idx is now the H.264-spec
+       * partition_id = mbPartIdx*4 + subMbPartIdx (subMbPartIdx=0 for
+       * non-8x8 modes). For P_16x8 mbPartIdx=i so id = i*4 = {0, 4}.
+       * The last arg `iIdx` keeps its OpenH264 meaning (raster 4x4 index
+       * for pixel addressing via g_kuiSmb4AddrIn256). */
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe16x8[i],
-                                    (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
+                                    (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
                                     (uint8_t)iIdx, 16, 8);
       UpdateP16x8MotionInfo (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe16x8[i].sMvp;
@@ -1799,10 +1808,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       iPixStride += ME_REFINE_BUF_WIDTH_BLK8;
       PredInter8x16Mv (pMbCache, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMvp);
       MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iIdx], &pWelsMd->sMe.sMe8x16[i], &sMeRefine, 8, 16);
-      /* phasm-stego HOOK-H3: P_8x16 MVD post-refine override per partition. */
+      /* phasm-stego HOOK-H3: P_8x16 MVD post-refine override per partition.
+       * #549 Bug 5 (2026-05-19): partition_idx = spec mbPartIdx*4 = i*4.
+       * Coincidentally equal to iIdx (= i<<2) here but kept explicit. */
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe8x16[i],
-                                    (uint8_t)iIdx, (uint8_t)pWelsMd->uiRef,
+                                    (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
                                     (uint8_t)iIdx, 8, 16);
       update_P8x16_motion_info (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe8x16[i].sMvp;
@@ -1836,10 +1847,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
         InitMeRefinePointer (&sMeRefine, pMbCache, g_kiPixStrideIdx8x8[i]);
         PredMv (&pMbCache->sMvComponents, iBlk8Idx, 2, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMvp);
         MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk8Idx], &pWelsMd->sMe.sMe8x8[i], &sMeRefine, 8, 8);
-        /* phasm-stego HOOK-H4: P_8x8/SUB_MB_TYPE_8x8 MVD per 8x8 partition. */
+        /* phasm-stego HOOK-H4: P_8x8/SUB_MB_TYPE_8x8 MVD per 8x8 partition.
+         * #549 Bug 5 (2026-05-19): partition_idx = mbPartIdx*4 + subMbPartIdx
+         * = i*4 + 0. Coincidentally equal to iBlk8Idx (= i<<2). */
         phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                       pDstLuma, &pWelsMd->sMe.sMe8x8[i],
-                                      (uint8_t)iBlk8Idx, (uint8_t)pWelsMd->uiRef,
+                                      (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
                                       (uint8_t)iBlk8Idx, 8, 8);
         UpdateP8x8MotionInfo (pMbCache, pCurMb, iBlk8Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMv);
         pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk8Idx]] = pWelsMd->sMe.sMe8x8[i].sMvp;
@@ -1874,10 +1887,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe4x4[i][j], &sMeRefine, 4, 4);
           /* phasm-stego HOOK-H5: P_8x8/SUB_MB_TYPE_4x4 MVD (dead code in
            * v2.6.0 stock builds — pfInterFineMd pins to SUB_MB_TYPE_8x8;
-           * wired for completeness if future build flags enable 4x4). */
+           * wired for completeness if future build flags enable 4x4).
+           * #549 Bug 5 (2026-05-19): partition_idx = mbPartIdx*4 + subMbPartIdx
+           * = i*4 + j. Coincidentally equal to iBlk4x4Idx (= iBlk8Idx + j). */
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe4x4[i][j],
-                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
                                         (uint8_t)iBlk4x4Idx, 4, 4);
           UpdateP4x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk4x4Idx]] = pWelsMd->sMe.sMe4x4[i][j].sMvp;
@@ -1912,10 +1927,13 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           PredMv (&pMbCache->sMvComponents, iBlk4x4Idx, 2, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x4[i][j].sMvp);
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe8x4[i][j], &sMeRefine, 8, 4);
           /* phasm-stego HOOK-H6: P_8x8/SUB_MB_TYPE_8x4 MVD (dead code in
-           * v2.6.0 stock builds). */
+           * v2.6.0 stock builds).
+           * #549 Bug 5 (2026-05-19): partition_idx = mbPartIdx*4 + subMbPartIdx
+           * = i*4 + j. iBlk4x4Idx here = iBlk8Idx + (j<<1) = i*4 + 2j, which
+           * does NOT match — pass the spec form explicitly. */
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe8x4[i][j],
-                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
                                         (uint8_t)iBlk4x4Idx, 8, 4);
           UpdateP8x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
@@ -1951,10 +1969,12 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           PredMv (&pMbCache->sMvComponents, iBlk4x4Idx, 1, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x8[i][j].sMvp);
           MeRefineFracPixel (pEncCtx, pDstLuma + g_kuiSmb4AddrIn256[iBlk4x4Idx], &pWelsMd->sMe.sMe4x8[i][j], &sMeRefine, 4, 8);
           /* phasm-stego HOOK-H7: P_8x8/SUB_MB_TYPE_4x8 MVD (dead code in
-           * v2.6.0 stock builds). */
+           * v2.6.0 stock builds).
+           * #549 Bug 5 (2026-05-19): partition_idx = mbPartIdx*4 + subMbPartIdx
+           * = i*4 + j. Coincidentally equal to iBlk4x4Idx (= iBlk8Idx + j). */
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe4x8[i][j],
-                                        (uint8_t)iBlk4x4Idx, (uint8_t)pWelsMd->uiRef,
+                                        (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
                                         (uint8_t)iBlk4x4Idx, 4, 8);
           UpdateP4x8MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x8[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe4x8[i][j].sMvp;

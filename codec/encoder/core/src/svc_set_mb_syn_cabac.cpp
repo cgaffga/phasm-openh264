@@ -430,9 +430,19 @@ void WelsCabacMbRef (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbCache, int1
  *
  * Stub (`phasm_apply_bypass_bin_override`) returns `orig_bin`
  * unconditionally; byte-identical to pre-Phase-4.3. */
+/* #549 Bug 5 fix (2026-05-19): renamed `phasm_partition_idx` to
+ * `phasm_partition_id` to signal the new contract: callers pass the
+ * H.264 spec `mbPartIdx * 4 + subMbPartIdx` (0..15, packed) instead
+ * of the raster 4x4 index of the partition's top-left block. The
+ * walker side (pure-Rust `decode_one_mvd_pair_p` /
+ * `decode_sub_mb_mvds`) uses the same spec convention, so the
+ * orchestrator's `enc_pre_emit` key lookup now matches without any
+ * additional translation. `i4x4ScanIdx` is no longer overloaded for
+ * the hook identifier — `WelsCabacMbMvd`'s neighbour lookups still
+ * use it, but it no longer doubles as the partition_id. */
 inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, int32_t iPredMvd,
                               uint16_t phasm_mb_x, uint16_t phasm_mb_y,
-                              uint8_t  phasm_partition_idx, uint8_t phasm_mv_component) {
+                              uint8_t  phasm_partition_id, uint8_t phasm_mv_component) {
   const int32_t iAbsMvd = WELS_ABS (sMvd);
   int32_t iCtxInc = 0;
   int32_t iPrefix = WELS_MIN (iAbsMvd, 9);
@@ -448,7 +458,7 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
     phasm_pos.frame_num     = PhasmStegoGetFrameNum();
     phasm_pos.mb_x          = phasm_mb_x;
     phasm_pos.mb_y          = phasm_mb_y;
-    phasm_pos.partition_idx = phasm_partition_idx;
+    phasm_pos.partition_idx = phasm_partition_id;
     phasm_pos.sub_block     = 0xff;
     phasm_pos.coeff_idx     = 0xff;
     phasm_pos.block_cat     = 0xff;
@@ -497,7 +507,12 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
   }
 }
 SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
-                          SMVUnitXY sCurMv, SMVUnitXY sPredMv, int16_t i4x4ScanIdx) {
+                          SMVUnitXY sCurMv, SMVUnitXY sPredMv, int16_t i4x4ScanIdx,
+                          uint8_t phasm_partition_id) {
+  /* #549 Bug 5 fix (2026-05-19): `i4x4ScanIdx` keeps its OpenH264
+   * meaning — raster 4x4 index, used for sMvd neighbour lookups
+   * below. `phasm_partition_id` is the new spec partition_id
+   * (mbPartIdx*4 + subMbPartIdx) passed straight to the hook. */
   uint32_t iAbsMvd0, iAbsMvd1;
   uint8_t uiNeighborAvail = pCurMb->uiNeighborAvail;
   SMVUnitXY sMvd;
@@ -520,17 +535,15 @@ SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
   iAbsMvd0 = WELS_ABS (sMvdLeft.iMvX) + WELS_ABS (sMvdTop.iMvX);
   iAbsMvd1 = WELS_ABS (sMvdLeft.iMvY) + WELS_ABS (sMvdTop.iMvY);
 
-  /* #538 Phase 4.3 — pass position context to WelsCabacMbMvdLx so the
-   * MvdSign wire-only override hook can build a complete pos. The
-   * `i4x4ScanIdx` parameter doubles as the partition_idx for hooks
-   * that operate per-4x4 (partitioned 8x8 / 4x4 / 8x4 / 4x8 modes).
-   * For non-partitioned MBs the caller passes 0. */
+  /* #549 Bug 5: forward the H.264-spec partition_id, NOT i4x4ScanIdx.
+   * Walker and encoder now agree on this value. See WelsCabacMbMvdLx
+   * doc-comment for the convention. */
   WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvX, 40, iAbsMvd0,
                     (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                    (uint8_t)i4x4ScanIdx, /*mv_component=*/0);
+                    phasm_partition_id, /*mv_component=*/0);
   WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvY, 47, iAbsMvd1,
                     (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                    (uint8_t)i4x4ScanIdx, /*mv_component=*/1);
+                    phasm_partition_id, /*mv_component=*/1);
   return sMvd;
 }
 static void WelsCabacSubMbType (SCabacCtx* pCabacCtx, SMB* pCurMb) {
@@ -553,12 +566,18 @@ static void WelsCabacSubMbType (SCabacCtx* pCabacCtx, SMB* pCurMb) {
 static void WelsCabacSubMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbCache, const int kiMbWidth) {
   SMVUnitXY sMvd;
   int32_t i8x8Idx, i4x4ScanIdx;
+  /* #549 Bug 5 fix (2026-05-19): each WelsCabacMbMvd call now also
+   * receives phasm_partition_id = mbPartIdx * 4 + subMbPartIdx, where
+   * mbPartIdx == i8x8Idx for P_8x8 and subMbPartIdx is the index
+   * within the 8x8 (0 for SUB_8x8; 0..1 for SUB_8x4/SUB_4x8; 0..3
+   * for SUB_4x4). The walker's `decode_sub_mb_mvds` uses the same
+   * formula via its `p()` helper. */
   for (i8x8Idx = 0; i8x8Idx < 4; ++i8x8Idx) {
     uint32_t uiSubMbType = pCurMb->uiSubMbType[i8x8Idx];
     if (SUB_MB_TYPE_8x8 == uiSubMbType) {
       i4x4ScanIdx = g_kuiMbCountScan4Idx[i8x8Idx << 2];
       sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, kiMbWidth, pCurMb->sMv[i4x4ScanIdx], pMbCache->sMbMvp[i4x4ScanIdx],
-                             i4x4ScanIdx);
+                             i4x4ScanIdx, (uint8_t)(i8x8Idx * 4 + 0));
       pCurMb->sMvd[    i4x4ScanIdx].sAssignMv (sMvd);
       pCurMb->sMvd[1 + i4x4ScanIdx].sAssignMv (sMvd);
       pCurMb->sMvd[4 + i4x4ScanIdx].sAssignMv (sMvd);
@@ -567,14 +586,14 @@ static void WelsCabacSubMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbC
       for (int32_t i4x4Idx = 0; i4x4Idx < 4; ++i4x4Idx) {
         i4x4ScanIdx = g_kuiMbCountScan4Idx[ (i8x8Idx << 2) + i4x4Idx];
         sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, kiMbWidth, pCurMb->sMv[i4x4ScanIdx], pMbCache->sMbMvp[i4x4ScanIdx],
-                               i4x4ScanIdx);
+                               i4x4ScanIdx, (uint8_t)(i8x8Idx * 4 + i4x4Idx));
         pCurMb->sMvd[i4x4ScanIdx].sAssignMv (sMvd);
       }
     } else if (SUB_MB_TYPE_8x4 == uiSubMbType) {
       for (int32_t i8x4Idx = 0; i8x4Idx < 2; ++i8x4Idx) {
         i4x4ScanIdx = g_kuiMbCountScan4Idx[ (i8x8Idx << 2) + (i8x4Idx << 1)];
         sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, kiMbWidth, pCurMb->sMv[i4x4ScanIdx], pMbCache->sMbMvp[i4x4ScanIdx],
-                               i4x4ScanIdx);
+                               i4x4ScanIdx, (uint8_t)(i8x8Idx * 4 + i8x4Idx));
         pCurMb->sMvd[    i4x4ScanIdx].sAssignMv (sMvd);
         pCurMb->sMvd[1 + i4x4ScanIdx].sAssignMv (sMvd);
       }
@@ -582,7 +601,7 @@ static void WelsCabacSubMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, SMbCache* pMbC
       for (int32_t i4x8Idx = 0; i4x8Idx < 2; ++i4x8Idx) {
         i4x4ScanIdx = g_kuiMbCountScan4Idx[ (i8x8Idx << 2) + i4x8Idx];
         sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, kiMbWidth, pCurMb->sMv[i4x4ScanIdx], pMbCache->sMbMvp[i4x4ScanIdx],
-                               i4x4ScanIdx);
+                               i4x4ScanIdx, (uint8_t)(i8x8Idx * 4 + i4x8Idx));
         pCurMb->sMvd[    i4x4ScanIdx].sAssignMv (sMvd);
         pCurMb->sMvd[4 + i4x4ScanIdx].sAssignMv (sMvd);
       }
@@ -954,7 +973,8 @@ int32_t WelsSpatialWriteMbSynCabac (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* p
       if (uiNumRefIdxL0Active > 0) {
         WelsCabacMbRef (pCabacCtx, pCurMb, pMbCache, 0);
       }
-      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[0], pMbCache->sMbMvp[0], 0);
+      /* #549 Bug 5: phasm_partition_id = mbPart(0)*4 + subPart(0) = 0. */
+      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[0], pMbCache->sMbMvp[0], 0, /*phasm_partition_id=*/0);
 
       for (i = 0; i < 16; ++i) {
         pCurMb->sMvd[i].sAssignMv (sMvd);
@@ -965,11 +985,12 @@ int32_t WelsSpatialWriteMbSynCabac (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* p
         WelsCabacMbRef (pCabacCtx, pCurMb, pMbCache, 0);
         WelsCabacMbRef (pCabacCtx, pCurMb, pMbCache, 12);
       }
-      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth , pCurMb->sMv[0], pMbCache->sMbMvp[0], 0);
+      /* #549 Bug 5: mbPart 0 (top) → id=0; mbPart 1 (bottom) → id=4. */
+      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth , pCurMb->sMv[0], pMbCache->sMbMvp[0], 0, /*phasm_partition_id=*/0);
       for (i = 0; i < 8; ++i) {
         pCurMb->sMvd[i].sAssignMv (sMvd);
       }
-      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[8], pMbCache->sMbMvp[1], 8);
+      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[8], pMbCache->sMbMvp[1], 8, /*phasm_partition_id=*/4);
       for (i = 8; i < 16; ++i) {
         pCurMb->sMvd[i].sAssignMv (sMvd);
       }
@@ -978,12 +999,13 @@ int32_t WelsSpatialWriteMbSynCabac (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* p
         WelsCabacMbRef (pCabacCtx, pCurMb, pMbCache, 0);
         WelsCabacMbRef (pCabacCtx, pCurMb, pMbCache, 2);
       }
-      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[0], pMbCache->sMbMvp[0], 0);
+      /* #549 Bug 5: mbPart 0 (left) → id=0; mbPart 1 (right) → id=4. */
+      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth, pCurMb->sMv[0], pMbCache->sMbMvp[0], 0, /*phasm_partition_id=*/0);
       for (i = 0; i < 16; i += 4) {
         pCurMb->sMvd[i    ].sAssignMv (sMvd);
         pCurMb->sMvd[i + 1].sAssignMv (sMvd);
       }
-      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth,  pCurMb->sMv[2], pMbCache->sMbMvp[1], 2);
+      sMvd = WelsCabacMbMvd (pCabacCtx, pCurMb, iMbWidth,  pCurMb->sMv[2], pMbCache->sMbMvp[1], 2, /*phasm_partition_id=*/4);
       for (i = 0; i < 16; i += 4) {
         pCurMb->sMvd[i + 2].sAssignMv (sMvd);
         pCurMb->sMvd[i + 3].sAssignMv (sMvd);
