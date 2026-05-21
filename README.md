@@ -17,6 +17,20 @@ fork is not a general-purpose codec replacement.
 
 ## Status
 
+- **Phase D shipped 2026-05-18 → v1.0 production default in
+  [phasm-core](https://crates.io/crates/phasm-core).** Production
+  wire_only orchestrator default (commit `14ad952`), Phase 4 replay
+  wireup + Phase 5 cascade-safety closed, full 53/53 corpus +
+  visual_psnr + cascade_safety + pass2_replay + streaming + 4domain
+  + pure_rust_per_gop + lib gates green at 1080p. Used by
+  [phasm-core v0.3.0+](https://crates.io/crates/phasm-core) as the
+  default H.264 backend.
+- **Sibling forks (AV1) shipped 2026-05-21**:
+  [phasm-rav1e](https://github.com/cgaffga/phasm-rav1e) (encoder) +
+  [phasm-dav1d](https://github.com/cgaffga/phasm-dav1d) (decoder)
+  follow the same hook-surface pattern for AV1 video stego. AV1
+  forks are royalty-free per AOM AV1; this OpenH264 fork retains
+  the Via LA AVC patent-pool posture.
 - **Phase A.5 (hook surface, Stages 0–8): SHIPPED.** 15 stego hooks
   across encoder paths (intra coeffs, inter coeffs, single + partitioned
   MVDs).
@@ -26,9 +40,9 @@ fork is not a general-purpose codec replacement.
   path tracks the stego-modified pixels. Closes the inter-frame leak
   class where a flipped-coefficient MB on frame N could pollute the
   motion-compensation references for frames N+1..GOP-end.
-- **v1.0 state:** hook ABI and dual-recon are stable. Pinned at fork
-  branch `phasm-stego`. Tagged as `phasm-stego-v0.1.0` for the
-  hook-surface freeze.
+- **v1.0 state:** hook ABI + dual-recon + wire_only orchestrator path
+  are stable. Pinned at fork branch `phasm-stego`. Tagged as
+  `phasm-stego-v0.1.0` for the hook-surface freeze.
 - **C.8.13(b) CLOSED 2026-05-13:** the round-trip flake was two
   bugs — one fork-side, one orchestrator-side. (1) HOOK-F (P-luma
   inter dual-write) was passing `coeff_idx_scanned` where the
