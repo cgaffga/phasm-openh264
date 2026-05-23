@@ -274,8 +274,16 @@ int32_t WelsWriteSpsSyntax (SWelsSPS* pSps, SBitStringAux* pBitStringAux, int32_
   BsWriteOneBit (pLocalBitStringAux, pSps->bConstraintSet3Flag);        // bConstraintSet3Flag
   if (PRO_HIGH == pSps->uiProfileIdc || PRO_EXTENDED == pSps->uiProfileIdc ||
       PRO_MAIN == pSps->uiProfileIdc) {
-    BsWriteOneBit (pLocalBitStringAux, 1);        // bConstraintSet4Flag: If profile_idc is equal to 77, 88, or 100, constraint_set4_flag equal to 1 indicates that the value of frame_mbs_only_flag is equal to 1. constraint_set4_flag equal to 0 indicates that the value of frame_mbs_only_flag may or may not be equal to 1.
-    BsWriteOneBit (pLocalBitStringAux, 1);        // bConstraintSet5Flag: If profile_idc is equal to 77, 88, or 100, constraint_set5_flag equal to 1 indicates that B slice types are not present in the coded video sequence. constraint_set5_flag equal to 0 indicates that B slice types may or may not be present in the coded video sequence.
+    // PHASM V0.4.D (2026-05-23): constraint_set4/5 emitted as 0 to
+    // match the dominant real-world cohort. Upstream OH264 hardcoded
+    // both to 1 (truthful claims: frame_mbs_only=1 + no B-slices in
+    // output). Real iPhone/DJI/Lumix encoders set both to 0 even when
+    // the underlying claims are equally true — they don't bother
+    // asserting these constraints. Setting to 0 = "no claim"; the
+    // actual frame_mbs_only_flag + per-slice mb_type still tell the
+    // truth. Zero behavior change downstream of these advisory bits.
+    BsWriteOneBit (pLocalBitStringAux, 0);        // bConstraintSet4Flag (was 1, now 0 for stealth)
+    BsWriteOneBit (pLocalBitStringAux, 0);        // bConstraintSet5Flag (was 1, now 0 for stealth)
     BsWriteBits (pLocalBitStringAux, 2, 0);                               // reserved_zero_2bits, equal to 0
   } else {
     BsWriteBits (pLocalBitStringAux, 4, 0);                               // reserved_zero_4bits, equal to 0
@@ -500,7 +508,18 @@ int32_t WelsInitSps (SWelsSPS* pSps, SSpatialLayerConfig* pLayerParam, SSpatialL
 
   //max value of both iFrameNum and POC are 2^16-1, in our encoder, iPOC=2*iFrameNum, so max of iFrameNum should be 2^15-1.--
   pSps->uiLog2MaxFrameNum = 15;//16;
-  pSps->uiPocType = 2;
+  // PHASM V0.4.D (2026-05-23): pic_order_cnt_type emitted as 0 (was 2).
+  // POC type 2 is "implicit POC = 2*frame_num" — saves a per-slice
+  // pic_order_cnt_lsb field but forbids B-frames AT THE BITSTREAM LEVEL.
+  // Real iPhone/DJI/Lumix/x264-High all use type 0 (explicit POC LSB
+  // per slice header), even when emitting IPPPP — they keep the
+  // structural option for B-frames open. Type 2 on phasm was a hard
+  // wire-level tell ("encoder structurally cannot do B-frames").
+  // Type 0 emit path is already implemented (au_set.cpp:300 + slice
+  // encode 352/428); the walker handles type 0 (sps.rs:148,
+  // slice.rs:156). Each slice header gains iLog2MaxPocLsb bits of
+  // pic_order_cnt_lsb payload (~16 bits at the default).
+  pSps->uiPocType = 0;
   pSps->iLog2MaxPocLsb = 1 + pSps->uiLog2MaxFrameNum;
 
   pSps->iNumRefFrames = kiNumRefFrame;        /* min pRef size when fifo pRef operation*/
