@@ -2143,6 +2143,15 @@ TRY_REENCODING:
                         pCurMb->uiMbType, pCurMb->uiCbp);
     /* phasm-stego #533.2: Pass-1 capture (P-slice main path). */
     phasm_capture_pcurmb (pCurMb, pMbCache);
+    /* P3.3b: advance the replay pointer for EVERY MB (inter + intra).
+     * The Rust side sets the pointer to the start of the per-frame
+     * flat buffer before encode_frame. Each MB consumes 256 entries
+     * (luma coefficients). Intra MBs don't read from it (they use
+     * their own quantize path), but advancing keeps the pointer
+     * aligned for the next inter MB. */
+    if (phasm_get_coeff_replay_mode()) {
+      phasm_advance_replay_coeffs(256);
+    }
 
     //step (6): begin to write bit stream; if the pSlice size is controlled, the writing may be skipped
 

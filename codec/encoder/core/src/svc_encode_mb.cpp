@@ -615,10 +615,9 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
     const int16_t* replay = phasm_get_replay_coeffs(&replay_count);
     if (replay && replay_count >= 256) {
       memcpy(pRes, replay, sizeof(int16_t) * 256);
-      /* P3.3b.4: auto-advance the replay pointer so the next MB reads
-       * the next 256-entry slice. The Rust side sets the pointer once
-       * per frame to a flat buffer of n_mbs * 256 entries. */
-      phasm_advance_replay_coeffs(256);
+      /* P3.3b.5 fix: auto-advance moved to svc_encode_slice.cpp's
+       * per-MB loop (fires for ALL MBs, not just inter). Keeps the
+       * pointer aligned when intra-in-P MBs skip WelsEncInterY. */
     }
     for (i = 0; i < 4; i++) {
       iSingleCtr8x8[i] = 0;
