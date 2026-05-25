@@ -628,7 +628,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
           if (d < 0) d = -d;
           if (d > max_diff) max_diff = d;
         }
-        if (max_diff <= 4) {
+        if (max_diff <= 1) {
           memcpy(pRes, replay, sizeof(int16_t) * 256);
         }
       }
