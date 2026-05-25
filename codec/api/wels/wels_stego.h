@@ -517,6 +517,10 @@ void phasm_set_replay_coeffs(const int16_t* coeffs, int32_t count);
 PhasmPostQuantCallback phasm_get_post_quant_callback(void);
 int phasm_get_coeff_replay_mode(void);
 const int16_t* phasm_get_replay_coeffs(int32_t* count);
+/* P3.3b.4: advance the replay pointer by n entries. Called by
+ * WelsEncInterY after consuming 256 coefficients so the next MB
+ * reads the next slice of the per-frame flat buffer. */
+void phasm_advance_replay_coeffs(int32_t n);
 
 /* ---------------------------------------------------------------------
  * Phase 4 (#538) — Wire-only bypass-bin override (Layer 2 of Pass-2).

@@ -287,6 +287,13 @@ const int16_t* phasm_get_replay_coeffs(int32_t* count) {
   return g_phasm_replay_coeffs;
 }
 
+void phasm_advance_replay_coeffs(int32_t n) {
+  if (g_phasm_replay_coeffs && g_phasm_replay_coeff_count >= n) {
+    g_phasm_replay_coeffs += n;
+    g_phasm_replay_coeff_count -= n;
+  }
+}
+
 // Phase C.9.2 (#450) per-slice override counter. Incremented inside the
 // apply_*_hooks return-1 site. Reset at the end of every deblock pass
 // (slice + frame variants). Read at the START of DeblockingFilterSlice
