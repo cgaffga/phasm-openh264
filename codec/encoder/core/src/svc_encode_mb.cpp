@@ -622,16 +622,13 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
         if (replay[k] != 0) { has_data = true; break; }
       }
       if (has_data) {
-        int diverged = 0, total_nz = 0;
+        int max_diff = 0;
         for (int k = 0; k < 256; k++) {
-          if (replay[k] != 0 || pRes[k] != 0) {
-            total_nz++;
-            int d = replay[k] - pRes[k];
-            if (d < 0) d = -d;
-            if (d > 2) diverged++;
-          }
+          int d = replay[k] - pRes[k];
+          if (d < 0) d = -d;
+          if (d > max_diff) max_diff = d;
         }
-        if (total_nz == 0 || diverged * 10 <= total_nz) {
+        if (max_diff <= 4) {
           memcpy(pRes, replay, sizeof(int16_t) * 256);
         }
       }
