@@ -287,6 +287,17 @@ const int16_t* phasm_get_replay_coeffs(int32_t* count) {
   return g_phasm_replay_coeffs;
 }
 
+// D2.1 — per-row completion callback.
+static PhasmRowCompleteCallback g_phasm_row_complete_cb = nullptr;
+
+void phasm_set_row_complete_callback(PhasmRowCompleteCallback cb) {
+  g_phasm_row_complete_cb = cb;
+}
+
+PhasmRowCompleteCallback phasm_get_row_complete_callback(void) {
+  return g_phasm_row_complete_cb;
+}
+
 void phasm_advance_replay_coeffs(int32_t n) {
   if (g_phasm_replay_coeffs && g_phasm_replay_coeff_count >= n) {
     g_phasm_replay_coeffs += n;

@@ -512,6 +512,18 @@ typedef void (*PhasmPostQuantCallback)(
     uint8_t cbp_luma, uint8_t cbp_chroma, int32_t qp);
 
 void phasm_set_post_quant_callback(PhasmPostQuantCallback cb);
+
+/* D2.1 (2026-05-25) — per-row completion callback for windowed STC.
+ * Fires after the last MB in each row is fully encoded + reconstructed
+ * in WelsMdInterMbLoop. The Rust side runs mini-STC + bitstream
+ * patching + IDCT delta update synchronously before the encoder
+ * continues to the next row. */
+typedef void (*PhasmRowCompleteCallback)(
+    uint32_t frame_num, uint16_t row_y,
+    int32_t bs_byte_pos, int32_t bs_bits_left);
+
+void phasm_set_row_complete_callback(PhasmRowCompleteCallback cb);
+PhasmRowCompleteCallback phasm_get_row_complete_callback(void);
 void phasm_set_coeff_replay_mode(int enabled);
 void phasm_set_replay_coeffs(const int16_t* coeffs, int32_t count);
 PhasmPostQuantCallback phasm_get_post_quant_callback(void);

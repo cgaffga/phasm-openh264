@@ -2178,6 +2178,20 @@ TRY_REENCODING:
     //step (8): update status and other parameters
     pEncCtx->pFuncList->pfRc.pfWelsRcMbInfoUpdate (pEncCtx, pCurMb, pMd->iCostLuma, pSlice);
 
+    /* D2.1: fire per-row callback when the last MB in a row completes.
+     * The Rust side uses this to run per-row STC + bitstream patching
+     * + IDCT delta update before the next row's intra prediction reads
+     * from pDecPic. */
+    if ((int32_t)(pCurMb->iMbX + 1) >= pCurLayer->iMbWidth) {
+      PhasmRowCompleteCallback rc_cb = phasm_get_row_complete_callback();
+      if (rc_cb) {
+        int32_t bs_byte_pos = (int32_t)(pSlice->pSliceBsa->pCurBuf
+                              - pSlice->pSliceBsa->pStartBuf);
+        rc_cb(PhasmStegoGetFrameNum(), (uint16_t)pCurMb->iMbY,
+              bs_byte_pos, pSlice->pSliceBsa->iLeftBits);
+      }
+    }
+
     /*judge if all pMb in cur pSlice has been encoded*/
     ++ iNumMbCoded;
     iNextMbIdx = WelsGetNextMbOfSlice (pCurLayer, iCurMbIdx);
