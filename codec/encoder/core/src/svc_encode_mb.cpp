@@ -603,78 +603,65 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   int16_t aMax[16];
   int32_t i, j, iNoneZeroCount = 0;
 
-  /* P3.3b.3: replay mode — skip quantize, read from supplied buffer.
-   * The Rust side supplies the (possibly STC-flipped) coefficient
-   * array via phasm_set_replay_coeffs before this MB's encode.
-   * We memcpy into pRes, then re-run the scan loop to populate
-   * iLumaBlock + iSingleCtr (needed by CABAC + JVT-O079 suppression).
-   * Dequant + IDCT downstream will see the flipped values →
-   * post-flip reconstruction → closed loop. */
+  /* P3.3b.7: always quantize fresh first. */
+  for (i = 0; i < 4; i++) {
+    pfQuantizationFour4x4Max (pRes + i * 64, pFF, pMF, aMax + (i << 2));
+  }
+
+  /* P3.3b: if replay mode active, compare fresh-quantized pRes with
+   * the replay buffer. If they match closely (< 10% of non-zero
+   * positions diverge by > 2), overwrite pRes with replay data for
+   * closed-loop reconstruction. Otherwise keep fresh (open-loop,
+   * falls back to P3.3a DPB correction for this MB). */
   if (phasm_get_coeff_replay_mode()) {
     int32_t replay_count = 0;
     const int16_t* replay = phasm_get_replay_coeffs(&replay_count);
-    /* P3.3b.6 fix: if the replay buffer for this MB is all-zero
-     * (MB was P_SKIP in Pass 1, not captured), fall through to
-     * normal quantize. Without this, the MB gets zero coefficients
-     * → reconstructs as prediction-only → wrong when Pass 2's mode
-     * decision makes it inter with residual. */
-    bool replay_has_data = false;
     if (replay && replay_count >= 256) {
+      bool has_data = false;
       for (int k = 0; k < 256; k++) {
-        if (replay[k] != 0) { replay_has_data = true; break; }
+        if (replay[k] != 0) { has_data = true; break; }
       }
-      if (replay_has_data) {
-        memcpy(pRes, replay, sizeof(int16_t) * 256);
-      }
-    }
-    if (!replay_has_data) {
-      /* Fall through to normal quantize path below. */
-      goto phasm_normal_quantize;
-    }
-    for (i = 0; i < 4; i++) {
-      iSingleCtr8x8[i] = 0;
-      for (j = 0; j < 4; j++) {
-        int16_t block_max = 0;
-        for (int k = 0; k < 16; k++) {
-          int16_t v = pRes[k];
-          if (v < 0) v = -v;
-          if (v > block_max) block_max = v;
+      if (has_data) {
+        int diverged = 0, total_nz = 0;
+        for (int k = 0; k < 256; k++) {
+          if (replay[k] != 0 || pRes[k] != 0) {
+            total_nz++;
+            int d = replay[k] - pRes[k];
+            if (d < 0) d = -d;
+            if (d > 2) diverged++;
+          }
         }
-        aMax[(i << 2) + j] = block_max;
-        if (block_max == 0)
-          pfSetMemZeroSize8(pBlock, 32);
-        else {
-          pfScan4x4(pBlock, pRes);
-          if (block_max > 1)
-            iSingleCtr8x8[i] += 9;
-          else if (iSingleCtr8x8[i] < 6)
-            iSingleCtr8x8[i] += pfCalculateSingleCtr4x4(pBlock);
+        if (total_nz == 0 || diverged * 10 <= total_nz) {
+          memcpy(pRes, replay, sizeof(int16_t) * 256);
         }
-        pRes += 16;
-        pBlock += 16;
       }
-      iSingleCtrMb += iSingleCtr8x8[i];
     }
-  } else {
-phasm_normal_quantize:
-    for (i = 0; i < 4; i++) {
-      pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax + (i << 2));
-      iSingleCtr8x8[i] = 0;
-      for (j = 0; j < 4; j++) {
-        if (aMax[ (i << 2) + j] == 0)
-          pfSetMemZeroSize8 (pBlock, 32);
-        else {
-          pfScan4x4 (pBlock, pRes);
-          if (aMax[ (i << 2) + j] > 1)
-            iSingleCtr8x8[i] += 9;
-          else if (iSingleCtr8x8[i] < 6)
-            iSingleCtr8x8[i] += pfCalculateSingleCtr4x4 (pBlock);
-        }
-        pRes += 16;
-        pBlock += 16;
+  }
+
+  /* Scan loop: compute iSingleCtr + aMax + iLumaBlock from pRes. */
+  for (i = 0; i < 4; i++) {
+    iSingleCtr8x8[i] = 0;
+    for (j = 0; j < 4; j++) {
+      int16_t block_max = 0;
+      for (int k = 0; k < 16; k++) {
+        int16_t v = pRes[k];
+        if (v < 0) v = -v;
+        if (v > block_max) block_max = v;
       }
-      iSingleCtrMb += iSingleCtr8x8[i];
+      aMax[(i << 2) + j] = block_max;
+      if (block_max == 0)
+        pfSetMemZeroSize8 (pBlock, 32);
+      else {
+        pfScan4x4 (pBlock, pRes);
+        if (block_max > 1)
+          iSingleCtr8x8[i] += 9;
+        else if (iSingleCtr8x8[i] < 6)
+          iSingleCtr8x8[i] += pfCalculateSingleCtr4x4 (pBlock);
+      }
+      pRes += 16;
+      pBlock += 16;
     }
+    iSingleCtrMb += iSingleCtr8x8[i];
   }
   pBlock -= 256;
   pRes -= 256;
