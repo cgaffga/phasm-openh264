@@ -34,6 +34,7 @@
 #include "ref_list_mgr_svc.h"
 #include "utils.h"
 #include "picture_handle.h"
+#include "wels_stego.h"  // phasm P3.3a: phasm_set_dec_pic_y
 namespace WelsEnc {
 
 #define STR_ROOM 1
@@ -388,6 +389,10 @@ bool WelsUpdateRefList (sWelsEncCtx* pCtx) {
       ExpandReferencingPicture (pCtx->pDecPic->pData, pCtx->pDecPic->iWidthInPixel, pCtx->pDecPic->iHeightInPixel,
                                 pCtx->pDecPic->iLineSize,
                                 pCtx->pFuncList->sExpandPicFunc.pfExpandLumaPicture, pCtx->pFuncList->sExpandPicFunc.pfExpandChromaPicture);
+
+    // P3.3a: capture pDecPic Y plane for Rust-side DPB correction.
+    phasm_set_dec_pic_y(pCtx->pDecPic->pData[0],
+                        pCtx->pDecPic->iLineSize[0]);
 
     // move picture in list
     pCtx->pDecPic->uiTemporalId = kuiTid;

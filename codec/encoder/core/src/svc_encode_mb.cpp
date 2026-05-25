@@ -603,26 +603,79 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   int16_t aMax[16];
   int32_t i, j, iNoneZeroCount = 0;
 
-  for (i = 0; i < 4; i++) {
-    pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax + (i << 2));
-    iSingleCtr8x8[i] = 0;
-    for (j = 0; j < 4; j++) {
-      if (aMax[ (i << 2) + j] == 0)
-        pfSetMemZeroSize8 (pBlock, 32);
-      else {
-        pfScan4x4 (pBlock, pRes);
-        if (aMax[ (i << 2) + j] > 1)
-          iSingleCtr8x8[i] += 9;
-        else if (iSingleCtr8x8[i] < 6)
-          iSingleCtr8x8[i] += pfCalculateSingleCtr4x4 (pBlock);
-      }
-      pRes += 16;
-      pBlock += 16;
+  /* P3.3b.3: replay mode — skip quantize, read from supplied buffer.
+   * The Rust side supplies the (possibly STC-flipped) coefficient
+   * array via phasm_set_replay_coeffs before this MB's encode.
+   * We memcpy into pRes, then re-run the scan loop to populate
+   * iLumaBlock + iSingleCtr (needed by CABAC + JVT-O079 suppression).
+   * Dequant + IDCT downstream will see the flipped values →
+   * post-flip reconstruction → closed loop. */
+  if (phasm_get_coeff_replay_mode()) {
+    int32_t replay_count = 0;
+    const int16_t* replay = phasm_get_replay_coeffs(&replay_count);
+    if (replay && replay_count >= 256) {
+      memcpy(pRes, replay, sizeof(int16_t) * 256);
     }
-    iSingleCtrMb += iSingleCtr8x8[i];
+    for (i = 0; i < 4; i++) {
+      iSingleCtr8x8[i] = 0;
+      for (j = 0; j < 4; j++) {
+        int16_t block_max = 0;
+        for (int k = 0; k < 16; k++) {
+          int16_t v = pRes[k];
+          if (v < 0) v = -v;
+          if (v > block_max) block_max = v;
+        }
+        aMax[(i << 2) + j] = block_max;
+        if (block_max == 0)
+          pfSetMemZeroSize8(pBlock, 32);
+        else {
+          pfScan4x4(pBlock, pRes);
+          if (block_max > 1)
+            iSingleCtr8x8[i] += 9;
+          else if (iSingleCtr8x8[i] < 6)
+            iSingleCtr8x8[i] += pfCalculateSingleCtr4x4(pBlock);
+        }
+        pRes += 16;
+        pBlock += 16;
+      }
+      iSingleCtrMb += iSingleCtr8x8[i];
+    }
+  } else {
+    for (i = 0; i < 4; i++) {
+      pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax + (i << 2));
+      iSingleCtr8x8[i] = 0;
+      for (j = 0; j < 4; j++) {
+        if (aMax[ (i << 2) + j] == 0)
+          pfSetMemZeroSize8 (pBlock, 32);
+        else {
+          pfScan4x4 (pBlock, pRes);
+          if (aMax[ (i << 2) + j] > 1)
+            iSingleCtr8x8[i] += 9;
+          else if (iSingleCtr8x8[i] < 6)
+            iSingleCtr8x8[i] += pfCalculateSingleCtr4x4 (pBlock);
+        }
+        pRes += 16;
+        pBlock += 16;
+      }
+      iSingleCtrMb += iSingleCtr8x8[i];
+    }
   }
   pBlock -= 256;
   pRes -= 256;
+
+  /* P3.3b.1: fire post-quant callback for coefficient capture.
+   * At this point pRes[0..255] holds the 16 × 4×4 luma coefficients
+   * in raster order, freshly quantized. The callback lets Rust
+   * capture them for replay in Pass 3. */
+  {
+    PhasmPostQuantCallback pq_cb = phasm_get_post_quant_callback();
+    if (pq_cb) {
+      pq_cb(PhasmStegoGetFrameNum(),
+            (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
+            pRes, 256,
+            (uint8_t)pCurMb->uiCbp, 0, (int32_t)uiQp);
+    }
+  }
 
   /* phasm-stego C.8.6: snapshot CLEAN post-quant pre-HOOK-F luma pRes
    * (256 int16_t = 16 4x4 sub-blocks). This is in QUANT domain; the

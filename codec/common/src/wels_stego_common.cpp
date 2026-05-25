@@ -237,6 +237,56 @@ int phasm_get_dual_recon_enabled(void) {
   return g_phasm_dual_recon_enabled;
 }
 
+// P3.3a (2026-05-25) — process-global pDecPic Y plane capture for
+// post-frame DPB correction. Set by ref_list_mgr after DPB promotion;
+// read by the shim's phasm_encoder_get_dec_pic_y.
+static uint8_t* g_phasm_dec_pic_y_ptr    = nullptr;
+static int32_t  g_phasm_dec_pic_y_stride = 0;
+
+void phasm_set_dec_pic_y(uint8_t* y, int32_t stride) {
+  g_phasm_dec_pic_y_ptr    = y;
+  g_phasm_dec_pic_y_stride = stride;
+}
+
+bool phasm_encoder_get_enc_dec_pic(void* /*enc*/, uint8_t** y, int32_t* stride) {
+  if (!g_phasm_dec_pic_y_ptr) return false;
+  *y = g_phasm_dec_pic_y_ptr;
+  *stride = g_phasm_dec_pic_y_stride;
+  return true;
+}
+
+// P3.3b — post-quant callback + coefficient replay mode.
+static PhasmPostQuantCallback g_phasm_post_quant_cb = nullptr;
+static int g_phasm_coeff_replay_mode = 0;
+static const int16_t* g_phasm_replay_coeffs = nullptr;
+static int32_t g_phasm_replay_coeff_count = 0;
+
+void phasm_set_post_quant_callback(PhasmPostQuantCallback cb) {
+  g_phasm_post_quant_cb = cb;
+}
+
+void phasm_set_coeff_replay_mode(int enabled) {
+  g_phasm_coeff_replay_mode = (enabled != 0) ? 1 : 0;
+}
+
+void phasm_set_replay_coeffs(const int16_t* coeffs, int32_t count) {
+  g_phasm_replay_coeffs = coeffs;
+  g_phasm_replay_coeff_count = count;
+}
+
+PhasmPostQuantCallback phasm_get_post_quant_callback(void) {
+  return g_phasm_post_quant_cb;
+}
+
+int phasm_get_coeff_replay_mode(void) {
+  return g_phasm_coeff_replay_mode;
+}
+
+const int16_t* phasm_get_replay_coeffs(int32_t* count) {
+  if (count) *count = g_phasm_replay_coeff_count;
+  return g_phasm_replay_coeffs;
+}
+
 // Phase C.9.2 (#450) per-slice override counter. Incremented inside the
 // apply_*_hooks return-1 site. Reset at the end of every deblock pass
 // (slice + frame variants). Read at the START of DeblockingFilterSlice

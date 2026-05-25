@@ -485,6 +485,39 @@ uint64_t phasm_get_hook_single_applied(void);
 void phasm_set_dual_recon_enabled(int enabled);
 int  phasm_get_dual_recon_enabled(void);
 
+/* P3.3a (2026-05-25) — pDecPic Y plane capture for post-frame DPB
+ * correction. phasm_set_dec_pic_y is called by the fork's ref_list_mgr
+ * after DPB promotion. phasm_encoder_get_enc_dec_pic is called by the
+ * shim to expose the pointer to Rust. */
+void phasm_set_dec_pic_y(uint8_t* y, int32_t stride);
+bool phasm_encoder_get_enc_dec_pic(void* enc, uint8_t** y, int32_t* stride);
+
+/* P3.3b (2026-05-25) — post-quant coefficient capture + replay mode.
+ *
+ * Capture: phasm_set_post_quant_callback registers a function that
+ * receives the quantized coefficient buffer (pCoeffLevel, 384 int16_t)
+ * after each MB's quantization completes. The callback fires between
+ * quantize and dequant+IDCT in svc_encode_mb.cpp. Pass NULL to
+ * unregister.
+ *
+ * Replay: phasm_set_coeff_replay_mode(1) puts the encoder in replay
+ * mode. In replay mode, the encoder skips its own quantize step and
+ * reads coefficients from the buffer set by phasm_set_replay_coeffs.
+ * Prediction + CABAC emit + dequant + IDCT still run. Call
+ * phasm_set_replay_coeffs before each MB's encode to supply the
+ * (possibly STC-flipped) coefficient array. */
+typedef void (*PhasmPostQuantCallback)(
+    uint32_t frame_num, uint16_t mb_x, uint16_t mb_y,
+    const int16_t* coeffs, int32_t coeff_count,
+    uint8_t cbp_luma, uint8_t cbp_chroma, int32_t qp);
+
+void phasm_set_post_quant_callback(PhasmPostQuantCallback cb);
+void phasm_set_coeff_replay_mode(int enabled);
+void phasm_set_replay_coeffs(const int16_t* coeffs, int32_t count);
+PhasmPostQuantCallback phasm_get_post_quant_callback(void);
+int phasm_get_coeff_replay_mode(void);
+const int16_t* phasm_get_replay_coeffs(int32_t* count);
+
 /* ---------------------------------------------------------------------
  * Phase 4 (#538) — Wire-only bypass-bin override (Layer 2 of Pass-2).
  *
