@@ -613,11 +613,23 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   if (phasm_get_coeff_replay_mode()) {
     int32_t replay_count = 0;
     const int16_t* replay = phasm_get_replay_coeffs(&replay_count);
+    /* P3.3b.6 fix: if the replay buffer for this MB is all-zero
+     * (MB was P_SKIP in Pass 1, not captured), fall through to
+     * normal quantize. Without this, the MB gets zero coefficients
+     * → reconstructs as prediction-only → wrong when Pass 2's mode
+     * decision makes it inter with residual. */
+    bool replay_has_data = false;
     if (replay && replay_count >= 256) {
-      memcpy(pRes, replay, sizeof(int16_t) * 256);
-      /* P3.3b.5 fix: auto-advance moved to svc_encode_slice.cpp's
-       * per-MB loop (fires for ALL MBs, not just inter). Keeps the
-       * pointer aligned when intra-in-P MBs skip WelsEncInterY. */
+      for (int k = 0; k < 256; k++) {
+        if (replay[k] != 0) { replay_has_data = true; break; }
+      }
+      if (replay_has_data) {
+        memcpy(pRes, replay, sizeof(int16_t) * 256);
+      }
+    }
+    if (!replay_has_data) {
+      /* Fall through to normal quantize path below. */
+      goto phasm_normal_quantize;
     }
     for (i = 0; i < 4; i++) {
       iSingleCtr8x8[i] = 0;
@@ -644,6 +656,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
       iSingleCtrMb += iSingleCtr8x8[i];
     }
   } else {
+phasm_normal_quantize:
     for (i = 0; i < 4; i++) {
       pfQuantizationFour4x4Max (pRes, pFF,  pMF, aMax + (i << 2));
       iSingleCtr8x8[i] = 0;
