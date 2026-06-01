@@ -544,6 +544,48 @@ SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
   WelsCabacMbMvdLx (pCabacCtx, sMvd.iMvY, 47, iAbsMvd1,
                     (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
                     phasm_partition_id, /*mv_component=*/1);
+
+  /* CASCADE.V2 §A.1.10b — keep the neighbour mvd ctxIdxInc cache symmetric
+   * with the decoder. A wire-only MvdSuffixLsb override changes the |MVD|
+   * the DECODER reads (±1); that |MVD| then feeds the NEXT MB's mvd bin0
+   * ctxIdxInc (|sMvdLeft|+|sMvdTop| vs the 32 threshold). wire_only did NOT
+   * mutate the MV, so the encoder's sMvd cache would otherwise hold the
+   * pre-override magnitude and the two sides pick different CABAC contexts →
+   * desync (the iphone7 "cascade ceiling"). Store the OVERRIDDEN magnitude in
+   * the returned sMvd (→ pCurMb->sMvd[]). Context-only: sCurMv still holds the
+   * true MV, so MC / PMV / reconstruction are untouched — no predictor
+   * cascade. Mirrors the pure-Rust path (encoder_hook.rs:158-163). No-ops when
+   * no override fired (emitted == orig_lsb) → byte-identical without stego. */
+  {
+    int32_t aphasm_mvd[2] = { sMvd.iMvX, sMvd.iMvY };
+    for (int aphasm_c = 0; aphasm_c < 2; ++aphasm_c) {
+      const int32_t aphasm_abs = WELS_ABS (aphasm_mvd[aphasm_c]);
+      if (aphasm_abs < 9) continue;
+      PhasmStegoPos aphasm_pos;
+      aphasm_pos.frame_num     = PhasmStegoGetFrameNum();
+      aphasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
+      aphasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
+      aphasm_pos.partition_idx = phasm_partition_id;
+      aphasm_pos.sub_block     = 0xff;
+      aphasm_pos.coeff_idx     = 0xff;
+      aphasm_pos.block_cat     = 0xff;
+      aphasm_pos.ref_idx       = 0;
+      aphasm_pos.mv_component  = (uint8_t)aphasm_c;
+      aphasm_pos.domain        = (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB;
+      aphasm_pos._reserved     = 0;
+      const int32_t aphasm_orig_lsb = (aphasm_abs - 9) & 1;
+      const int32_t aphasm_emitted = phasm_apply_bypass_bin_override (
+          (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &aphasm_pos, aphasm_orig_lsb);
+      if (aphasm_emitted != aphasm_orig_lsb) {
+        const int32_t aphasm_new = (aphasm_orig_lsb == 0) ? (aphasm_abs + 1)
+                                                          : (aphasm_abs - 1);
+        aphasm_mvd[aphasm_c] = (aphasm_mvd[aphasm_c] < 0) ? -aphasm_new
+                                                          :  aphasm_new;
+      }
+    }
+    sMvd.iMvX = aphasm_mvd[0];
+    sMvd.iMvY = aphasm_mvd[1];
+  }
   return sMvd;
 }
 static void WelsCabacSubMbType (SCabacCtx* pCabacCtx, SMB* pCurMb) {
