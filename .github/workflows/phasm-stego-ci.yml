@@ -71,9 +71,21 @@ jobs:
         run: ninja -C _build -j $(${{ matrix.ncores_cmd }})
 
       - name: Bundled gtests (meson test)
-        run: meson test -C _build --print-errorlogs --num-processes 1
-        # --num-processes 1 keeps the test runs deterministic; the test
-        # harness exits non-zero on any gtest failure.
+        # The phasm-stego fork DELIBERATELY changes the encoder's normal
+        # (no-stego) output: V0.4.D Layer 3 stealth emits constraint_set4/5=0
+        # + pic_order_cnt_type=0 in the SPS unconditionally (commit d6a4bdf8)
+        # so phasm H.264 mimics common encoders. Upstream's byte-exact
+        # encoder-output regression tests therefore CAN'T pass and don't apply
+        # to this fork. Exclude exactly the 19 affected tests (all in the `api`
+        # suite): the encoder-output hash tests, the decode->re-encode hash
+        # tests, and the parse test that reads our modified SPS/POC. Build +
+        # the other 4 suites (processing/encoder/decoder/common) + the
+        # Deterministic-output gate below all still gate. See monorepo #813.
+        run: |
+          meson test -C _build --print-errorlogs --num-processes 1 \
+            --test-args='--gtest_filter=-EncodeFile/EncoderOutputTest.CompareOutput/*:DecodeEncodeFile/DecodeEncodeTest.CompareOutput/*:DecodeParseAPI.ParseOnly_General'
+        # --num-processes 1 keeps the test runs deterministic; the harness
+        # exits non-zero on any non-excluded gtest failure.
 
       - name: Deterministic-output gate
         run: |
