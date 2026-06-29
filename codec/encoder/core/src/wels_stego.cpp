@@ -863,6 +863,21 @@ extern "C" void phasm_stego_state_adopt_global_callbacks(void* stego_v) {
   st->has_session_state   = 1;
 }
 
+// B-full.6 (#895): mark this encoder a "clean session". Sets has_session_state
+// so the per-MB read-helpers return PER-INSTANCE values (not the libcommon
+// global fallback), but leaves the callbacks (and frame_num/pass_mode/user_data)
+// at their value-init NULL/0 — so every stego hook reads NULL enc_pre_emit and
+// no-ops. A 4b clean producer calls this after Encoder::new so it stays clean
+// even while a stego consumer has callbacks registered globally; WITHOUT it the
+// producer's has_session_state=0 would fall back to the consumer's global
+// enc_pre_emit and fire its hooks (corrupting the clean cover + the consumer's
+// DecisionCache). NULL stego ⇒ no-op.
+extern "C" void phasm_stego_state_mark_clean(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->has_session_state = 1;
+}
+
 // Per-MB read-helpers: per-instance when the instance is session-active, else
 // the libcommon global (dormant decoder + whole-video test paths, where
 // has_session_state stays 0). NULL stego ⇒ global. The hot-path branch is a

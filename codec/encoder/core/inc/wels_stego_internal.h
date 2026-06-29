@@ -110,6 +110,10 @@ void phasm_stego_state_set_user_data(void* stego, void* user_data);
  * after Encoder::new); the get-helpers read per-instance with global fallback so
  * a clean producer (no adopt) reads its own NULL callbacks and no-ops. */
 void phasm_stego_state_adopt_global_callbacks(void* stego);
+/* B-full.6 (#895): mark a clean producer "session-active" with NULL callbacks
+ * so its hooks read per-instance NULL (no-op) instead of falling back to a
+ * concurrent consumer's global callbacks. */
+void phasm_stego_state_mark_clean(void* stego);
 PhasmStegoEncPreEmitFn         phasm_stego_get_enc_pre_emit(void* stego);
 PhasmStegoMdCostFn             phasm_stego_get_md_cost_capture(void* stego);
 PhasmStegoCaptureMbDecisionFn  phasm_stego_get_capture_mb_decision(void* stego);
