@@ -1365,9 +1365,29 @@ void CWelsH264SVCEncoder::DumpSrcPicture (const SSourcePicture*  pSrcPic, const 
 #endif//DUMP_SRC_PICTURE
   return;
 }
+
+/* B-full.3a (#895) — per-encoder phasm stego-state accessor. m_pEncContext
+ * (and its pPhasmStego, added in B-full.1) is fully defined in this TU. */
+void* CWelsH264SVCEncoder::PhasmGetStegoState() {
+  return (m_pEncContext != NULL) ? m_pEncContext->pPhasmStego : NULL;
+}
 }
 
 using namespace WelsEnc;
+
+/* B-full.3a (#895) — handle-FFI primitive: resolve the public ISVCEncoder*
+ * (always a CWelsH264SVCEncoder) to its per-encoder phasm stego state, so the
+ * orchestrator can target frame_num / pass_mode / callbacks at THIS instance
+ * instead of a process-global. NULL-safe; returns NULL before init. extern "C"
+ * so the shim + Rust bind it by symbol. The downcast inverts
+ * WelsCreateSVCEncoder's `new CWelsH264SVCEncoder()` upcast (single
+ * inheritance from ISVCEncoder, zero pointer adjustment). */
+extern "C" void* phasm_isvc_get_stego_state(void* isvc_encoder) {
+  if (isvc_encoder == NULL) return NULL;
+  CWelsH264SVCEncoder* pEnc =
+      static_cast<CWelsH264SVCEncoder*>(reinterpret_cast<ISVCEncoder*>(isvc_encoder));
+  return pEnc->PhasmGetStegoState();
+}
 
 int32_t WelsCreateSVCEncoder (ISVCEncoder** ppEncoder) {
   if ((*ppEncoder = new CWelsH264SVCEncoder()) != NULL) {

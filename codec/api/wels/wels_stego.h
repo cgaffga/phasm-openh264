@@ -492,6 +492,12 @@ int  phasm_get_dual_recon_enabled(void);
 void phasm_set_dec_pic_y(uint8_t* y, int32_t stride);
 bool phasm_encoder_get_enc_dec_pic(void* enc, uint8_t** y, int32_t* stride);
 
+/* B-full.3a (#895) — resolve a public ISVCEncoder* to its per-encoder phasm
+ * stego state (sWelsEncCtx::pPhasmStego). The handle-FFI primitive the shim +
+ * Rust orchestrator use to target frame_num / pass_mode / callbacks at a
+ * specific encoder instead of a process-global. NULL-safe; NULL before init. */
+void* phasm_isvc_get_stego_state(void* enc);
+
 /* P3.3b (2026-05-25) — post-quant coefficient capture + replay mode.
  *
  * Capture: phasm_set_post_quant_callback registers a function that

@@ -96,6 +96,13 @@ class CWelsH264SVCEncoder : public ISVCEncoder {
   virtual int EXTAPI SetOption (ENCODER_OPTION opt_id, void* option);
   virtual int EXTAPI GetOption (ENCODER_OPTION opt_id, void* option);
 
+  /* B-full.3a (#895) — return this encoder instance's per-encoder phasm
+   * stego state (m_pEncContext->pPhasmStego), or NULL before init. The
+   * handle-FFI primitive the orchestrator uses to target frame_num /
+   * pass_mode / callbacks at THIS instance instead of a process-global.
+   * Non-virtual: no vtable/ABI change. */
+  void* PhasmGetStegoState();
+
  private:
   int InitializeInternal (SWelsSvcCodingParam* argv);
   void TraceParamInfo(SEncParamExt *pParam);
