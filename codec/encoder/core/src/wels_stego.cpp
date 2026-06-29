@@ -84,10 +84,18 @@ static int g_phasm_use_wire_only_overrides = 0;
  * PhasmStegoState definition, which appears further down) and defined
  * just after that struct. */
 struct PhasmStegoState;
+// Forward-declared with C language linkage to match the DEFINITION below,
+// which sits inside this TU's `extern "C"` block (it follows PhasmStegoState).
+// gcc treats a C++-linkage decl + C-linkage def as a hard error ("conflicting
+// declaration ... with 'C' linkage"); clang is lenient. `static` keeps the
+// helper file-local in both compilers — the `extern "C"` only aligns the
+// language linkage so the two declarations agree.
+extern "C" {
 static void phasm_maybe_reset_for_mb(void* stego_v,
                                      uint32_t frame_num,
                                      uint16_t mb_x,
                                      uint16_t mb_y);
+}
 
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
