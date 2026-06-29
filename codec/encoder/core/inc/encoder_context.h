@@ -245,6 +245,12 @@ typedef struct TagWelsEncCtx {
 #endif
   int64_t            uiLastTimestamp;
   uint8_t*           pDynamicBsBuffer[MAX_THREADS_NUM];
+  // phasm B-full.1 (#895): opaque per-encoder PhasmStegoState. Created in
+  // WelsInitEncoderExt, freed in FreeMemorySvc. NULL until B-full.2+ migrate
+  // the process-global stego statics onto it (per-instance ⇒ thread-safe
+  // encode for parallel-GOP). Reading it is deferred — output stays
+  // byte-identical at this increment.
+  void*              pPhasmStego;
 } sWelsEncCtx/*, *PWelsEncCtx*/;
 }
 #endif//sWelsEncCtx_H__

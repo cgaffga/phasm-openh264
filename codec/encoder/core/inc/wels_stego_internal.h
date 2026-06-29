@@ -381,6 +381,20 @@ void phasm_set_bypass_override(uint8_t domain,
 void phasm_set_use_wire_only_overrides(int enabled);
 int  phasm_get_use_wire_only_overrides(void);
 
+/* ---------------------------------------------------------------------
+ * B-full.1 (#895) — per-encoder stego state container.
+ *
+ * Bundles the encoder-only process-global stego statics so they can move
+ * onto sWelsEncCtx (per-instance) — the prerequisite for thread-safe
+ * concurrent stego encode (parallel-GOP, doc §12). `create` allocates a
+ * zero-initialized state; `destroy` frees it (NULL-safe). This increment
+ * only wires alloc/free into WelsInitEncoderExt / FreeMemorySvc; no reads
+ * are redirected yet, so the encoded bitstream is byte-identical. B-full.2+
+ * migrate the statics + their accessors onto `sWelsEncCtx::pPhasmStego`.
+ * ------------------------------------------------------------------ */
+void* phasm_stego_state_create(void);
+void  phasm_stego_state_destroy(void* p);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

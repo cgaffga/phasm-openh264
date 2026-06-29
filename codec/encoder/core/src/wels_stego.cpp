@@ -757,6 +757,29 @@ int phasm_get_use_wire_only_overrides(void) {
   return g_phasm_use_wire_only_overrides;
 }
 
+// B-full.1 (#895): per-encoder stego state container. Defined here so it can
+// hold PhasmBypassOverrides (file-local above) by value. This increment only
+// allocates/frees it from WelsInitEncoderExt / FreeMemorySvc — nothing reads
+// it yet, so the bitstream is byte-identical. B-full.2+ migrate the encoder
+// statics (bypass scratch, last-MB sentinels, wire-only flag, then the
+// libcommon-shared callbacks/frame_num/pass_mode) onto this struct so each
+// encoder instance carries its own stego state.
+struct PhasmStegoState {
+  PhasmBypassOverrides bypass_overrides;
+  uint32_t             last_mb_frame_num;
+  uint16_t             last_mb_x;
+  uint16_t             last_mb_y;
+  int                  use_wire_only_overrides;
+};
+
+extern "C" void* phasm_stego_state_create(void) {
+  return new PhasmStegoState();  // value-init zeroes the POD members
+}
+
+extern "C" void phasm_stego_state_destroy(void* p) {
+  delete static_cast<PhasmStegoState*>(p);  // delete nullptr is a no-op
+}
+
 /* Internal helper: validate slot indices for the given domain and
  * return a pointer to the slot byte, or nullptr if any index is out
  * of range. Used by both the populate side (`phasm_set_bypass_override`)

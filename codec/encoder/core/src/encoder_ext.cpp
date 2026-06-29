@@ -1835,6 +1835,10 @@ void FreeMemorySvc (sWelsEncCtx** ppCtx) {
     SWelsSvcCodingParam* pParam = pCtx->pSvcParam;
     int32_t ilayer = 0;
 
+    // phasm B-full.1 (#895): free the per-encoder stego state (NULL-safe).
+    phasm_stego_state_destroy (pCtx->pPhasmStego);
+    pCtx->pPhasmStego = NULL;
+
     // SStrideTables
     if (NULL != pCtx->pStrideTab) {
       if (NULL != pCtx->pStrideTab->pStrideDecBlockOffset[0][1]) {
@@ -2408,6 +2412,7 @@ int32_t WelsInitEncoderExt (sWelsEncCtx** ppCtx, SWelsSvcCodingParam* pCodingPar
   pCtx->iStatisticsLogInterval = STATISTICS_LOG_INTERVAL_MS;
   pCtx->uiLastTimestamp = -1;
   pCtx->bDeliveryFlag = true;
+  pCtx->pPhasmStego = phasm_stego_state_create();  // phasm B-full.1 (#895)
   *ppCtx = pCtx;
 
   WelsLog (pLogCtx, WELS_LOG_INFO, "WelsInitEncoderExt(), pCtx= 0x%p.", (void*)pCtx);
