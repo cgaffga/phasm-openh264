@@ -70,6 +70,17 @@ typedef struct TagCabacCtx {
   uint8_t*   m_pBufStart;
   uint8_t*   m_pBufEnd;
   uint8_t*   m_pBufCur;
+  /* B-full.2 (#895) — per-encoder stego state back-pointer. Set at
+   * WelsInitSliceCabac from pEncCtx->pPhasmStego (which the worker
+   * thread carries), so the leaf CABAC emit hooks
+   * (phasm_apply_bypass_bin_override) can reach the per-instance
+   * bypass-override scratch without a process-global. Opaque void* to
+   * avoid pulling the wels_stego struct into this header; the stego TU
+   * casts it back to PhasmStegoState*. NULL on any non-phasm encode
+   * (the read hook treats NULL as "no override", a pure passthrough).
+   * Read nowhere yet at this increment — the scratch read/populate
+   * migration onto it is the next B-full.2 step. */
+  void*      pPhasmStego;
 } SCabacCtx;
 
 

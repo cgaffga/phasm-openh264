@@ -970,6 +970,13 @@ void WelsInitSliceCabac (sWelsEncCtx* pEncCtx, SSlice* pSlice) {
   /* init cabac */
   WelsCabacContextInit (pEncCtx, &pSlice->sCabacCtx, pSlice->iCabacInitIdc);
   WelsCabacEncodeInit (&pSlice->sCabacCtx, pBs->pCurBuf, pBs->pEndBuf);
+  /* B-full.2 (#895) — carry the per-encoder stego state onto the slice
+   * CABAC context so the leaf bypass-bin emit hooks can reach the
+   * per-instance override scratch without a process-global. pEncCtx is
+   * the worker thread's own encoder; copying the pointer here (once per
+   * slice init, on the slice-worker thread) is the cross-thread-safe
+   * carrier the FFI set-thread can't reach directly. */
+  pSlice->sCabacCtx.pPhasmStego = pEncCtx->pPhasmStego;
 }
 
 int32_t WelsSpatialWriteMbSynCabac (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* pCurMb) {
