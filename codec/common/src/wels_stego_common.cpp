@@ -160,9 +160,23 @@ int     g_phasm_chroma_dirty[2] = {0, 0};
 // output, no fsnr observation).
 //
 // Set BEFORE phasm_encoder_initialize; the shim's wrapper threads the
-// flag through and the global is read inside InitDqLayers. Single-
-// threaded encoder default (#339 tracks revisit).
-int     g_phasm_dual_recon_enabled = 1;
+// flag through and the global is read inside InitDqLayers.
+//
+// B-lite.2 (#891, 2026-06-29 — parallel-GOP encode): `thread_local` so
+// parallel-GOP *producers* can each select their own dual_recon (clean
+// producers want 0 to skip the visual_recon mirror pool) WITHOUT racing
+// the consumer-emit (which needs 1) on a different thread. `thread_local`
+// is provably correct here — unlike the deblock-cross-thread trap the
+// Phase-0 audit warned about (`g_phasm_slice_override_count`, written on
+// the MB-encode thread + read on the deblock worker thread within ONE
+// encoder) — because dual_recon has exactly ONE read site:
+// `encoder_ext.cpp` InitDqLayers (ref-list / visual-mirror-pool alloc),
+// which runs SYNCHRONOUSLY on the thread that called
+// phasm_encoder_initialize, BEFORE any encode worker threads exist. The
+// Rust wrapper sets it immediately before initialize on the same thread
+// (Encoder::new_with_dual_recon), so set + read are always co-threaded.
+// It is never touched on a worker thread.
+thread_local int g_phasm_dual_recon_enabled = 1;
 
 // Phase C.9.2 (#450) — per-slice override counter for deblock skip-on-
 // clean. Incremented inside phasm_apply_coeff_hooks / *_dual and
