@@ -863,6 +863,30 @@ extern "C" void phasm_stego_state_adopt_global_callbacks(void* stego_v) {
   st->has_session_state   = 1;
 }
 
+// B-full.6b.3 / 4b (#894): set the per-instance ENCODER callbacks DIRECTLY from
+// arguments — the same per-instance write as `adopt`, but the source is the
+// caller's struct, not the registered globals. This lets each encoder install its
+// own handlers WITHOUT the process-wide single-session `WelsRegisterPhasm...` /
+// `SESSION_ALIVE` slot, so N concurrent producers no longer collide
+// (`another StegoSession is already alive`). `user_data` is set separately via
+// `phasm_stego_state_set_user_data`; the trampolines dispatch through it.
+// `dec_post_read` (decoder-only) + `dual_recon_observe` (libcommon) are NOT
+// per-instance and intentionally not set here.
+extern "C" void phasm_stego_state_set_callbacks(
+    void* stego_v,
+    PhasmStegoEncPreEmitFn enc_pre_emit,
+    PhasmStegoMdCostFn md_cost_capture,
+    PhasmStegoCaptureMbDecisionFn capture_mb_decision,
+    PhasmStegoReplayMbDecisionFn replay_mb_decision) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->enc_pre_emit        = enc_pre_emit;
+  st->md_cost_capture     = md_cost_capture;
+  st->capture_mb_decision = capture_mb_decision;
+  st->replay_mb_decision  = replay_mb_decision;
+  st->has_session_state   = 1;
+}
+
 // B-full.6 (#895): mark this encoder a "clean session". Sets has_session_state
 // so the per-MB read-helpers return PER-INSTANCE values (not the libcommon
 // global fallback), but leaves the callbacks (and frame_num/pass_mode/user_data)

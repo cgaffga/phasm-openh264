@@ -110,6 +110,17 @@ void phasm_stego_state_set_user_data(void* stego, void* user_data);
  * after Encoder::new); the get-helpers read per-instance with global fallback so
  * a clean producer (no adopt) reads its own NULL callbacks and no-ops. */
 void phasm_stego_state_adopt_global_callbacks(void* stego);
+/* B-full.6b.3 / 4b (#894): set the per-instance ENCODER callbacks DIRECTLY from
+ * arguments (NOT from the registered globals like `adopt`). This lets each encoder
+ * install its own stego handlers without the process-wide single-session
+ * `StegoSession::register` / `SESSION_ALIVE` slot — so N concurrent producers no
+ * longer collide. `user_data` is set separately via `set_user_data`; the
+ * trampolines dispatch via it. NULL stego ⇒ no-op. */
+void phasm_stego_state_set_callbacks(void* stego,
+                                     PhasmStegoEncPreEmitFn enc_pre_emit,
+                                     PhasmStegoMdCostFn md_cost_capture,
+                                     PhasmStegoCaptureMbDecisionFn capture_mb_decision,
+                                     PhasmStegoReplayMbDecisionFn replay_mb_decision);
 /* B-full.6 (#895): mark a clean producer "session-active" with NULL callbacks
  * so its hooks read per-instance NULL (no-op) instead of falling back to a
  * concurrent consumer's global callbacks. */
