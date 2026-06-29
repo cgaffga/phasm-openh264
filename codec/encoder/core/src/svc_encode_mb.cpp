@@ -152,7 +152,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
                                /*sub_block=*/phasm_k,
                                /*coeff_idx=*/0,
                                PHASM_BLOCK_CAT_LUMA_DC,
-                               &aDctT4Dc[phasm_k]) != 0);
+                               &aDctT4Dc[phasm_k], pEncCtx->pPhasmStego) != 0);
     }
   }
 
@@ -198,7 +198,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
                                    /*sub_block=*/(uint8_t)(i * 4 + phasm_sb),
                                    /*coeff_idx=*/phasm_c,
                                    PHASM_BLOCK_CAT_LUMA_AC,
-                                   &pRes[phasm_sb * 16 + phasm_c]) != 0);
+                                   &pRes[phasm_sb * 16 + phasm_c], pEncCtx->pPhasmStego) != 0);
         }
       }
     }
@@ -486,7 +486,7 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
                                /*sub_block=*/uiI4x4Idx,
                                /*coeff_idx=*/phasm_c,
                                PHASM_BLOCK_CAT_LUMA_4x4,
-                               &pResI4x4[phasm_c]) != 0);
+                               &pResI4x4[phasm_c], pEncCtx->pPhasmStego) != 0);
     }
   }
 
@@ -586,7 +586,7 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
   }
 }
 
-void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache) {
+void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache, void* phasm_stego) {
   PQuantizationMaxFunc pfQuantizationFour4x4Max         = pFuncList->pfQuantizationFour4x4Max;
   PSetMemoryZero pfSetMemZeroSize8                      = pFuncList->pfSetMemZeroSize8;
   PSetMemoryZero pfSetMemZeroSize64                     = pFuncList->pfSetMemZeroSize64;
@@ -748,7 +748,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
                                      /*coeff_idx=*/phasm_r,
                                      PHASM_BLOCK_CAT_LUMA_4x4,
                                      /*level_a (raster)=*/&phasm_pres[phasm_r],
-                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]) != 0);
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s], phasm_stego) != 0);
       }
     }
     phasm_set_p_luma_dirty(phasm_dr_p_luma_dirty ? 1 : 0);
@@ -802,7 +802,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   }
 }
 
-void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache, int16_t* pRes, int32_t iUV) {
+void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache, int16_t* pRes, int32_t iUV, void* phasm_stego) {
   PQuantizationHadamardFunc pfQuantizationHadamard2x2   = pFuncList->pfQuantizationHadamard2x2;
   PQuantizationMaxFunc pfQuantizationFour4x4Max         = pFuncList->pfQuantizationFour4x4Max;
   PSetMemoryZero pfSetMemZeroSize8                      = pFuncList->pfSetMemZeroSize8;
@@ -899,7 +899,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
                                    /*coeff_idx=*/phasm_c,
                                    PHASM_BLOCK_CAT_CHROMA_DC,
                                    /*level_a (aDct2x2/stack)=*/&aDct2x2[phasm_c],
-                                   /*level_b (iChromaDc/heap)=*/&iChromaDc[phasm_c]) != 0);
+                                   /*level_b (iChromaDc/heap)=*/&iChromaDc[phasm_c], phasm_stego) != 0);
     }
   }
 
@@ -991,7 +991,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
                                      /*coeff_idx=*/phasm_s,
                                      PHASM_BLOCK_CAT_CHROMA_AC,
                                      /*level_a (raster)=*/&phasm_pres[phasm_r],
-                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s]) != 0);
+                                     /*level_b (zigzag)=*/&phasm_pblock[phasm_s], phasm_stego) != 0);
       }
     }
   }

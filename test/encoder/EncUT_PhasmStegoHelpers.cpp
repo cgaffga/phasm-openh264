@@ -139,7 +139,7 @@ TEST(PhasmCoeffHooks, NoOverrideLeavesLevelUnchanged) {
   RegisterMock({-1, -1, -1, -1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 5;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, /*sub_block=*/0, /*coeff_idx=*/0, /*block_cat=*/0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, /*sub_block=*/0, /*coeff_idx=*/0, /*block_cat=*/0, &level, /*stego=*/nullptr));
   EXPECT_EQ(5, level);
   TearDownMock();
 }
@@ -148,7 +148,7 @@ TEST(PhasmCoeffHooks, ZeroLevelSkipsHookDispatch) {
   RegisterMock({0, 1});  // would override if called
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 0;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(0, level);
   EXPECT_EQ(0u, g_mock_history_count);
   TearDownMock();
@@ -160,7 +160,7 @@ TEST(PhasmCoeffHooks, SignFlipFromPositive) {
   RegisterMock({1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 5;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(-5, level);
   EXPECT_EQ(1u, g_mock_history_count);
   EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN, g_mock_history[0].pos.domain);
@@ -172,7 +172,7 @@ TEST(PhasmCoeffHooks, SignFlipFromNegative) {
   RegisterMock({0});  // override to positive
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = -7;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(7, level);
   EXPECT_EQ(1u, g_mock_history_count);
   EXPECT_EQ(1, g_mock_history[0].original_bit);  // original sign of -7 is 1
@@ -183,7 +183,7 @@ TEST(PhasmCoeffHooks, SignNoOpWhenOverrideMatches) {
   RegisterMock({0});  // already positive
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 7;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(7, level);
   TearDownMock();
 }
@@ -203,7 +203,7 @@ TEST(PhasmCoeffHooks, SuffixLsbDoesNotFireBelowThreshold) {
   RegisterMock({-1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 14;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(1u, g_mock_history_count);
   EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN, g_mock_history[0].pos.domain);
   TearDownMock();
@@ -216,7 +216,7 @@ TEST(PhasmCoeffHooks, SuffixLsbDoesNotFireAtLevel15) {
   RegisterMock({-1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 15;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(1u, g_mock_history_count);
   EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN, g_mock_history[0].pos.domain);
   TearDownMock();
@@ -230,7 +230,7 @@ TEST(PhasmCoeffHooks, SuffixLsbFlipFrom16PromotesTo17) {
   RegisterMock({-1, 0});  // sign no-op, suffix→0
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 16;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(17, level);
   EXPECT_EQ(2u, g_mock_history_count);
   EXPECT_EQ((uint8_t)PHASM_DOMAIN_COEFF_SIGN,        g_mock_history[0].pos.domain);
@@ -245,7 +245,7 @@ TEST(PhasmCoeffHooks, SuffixLsbFlipFrom17To18) {
   RegisterMock({-1, 1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 17;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(18, level);
   TearDownMock();
 }
@@ -255,7 +255,7 @@ TEST(PhasmCoeffHooks, SuffixLsbPreservesNegativeSign) {
   RegisterMock({-1, 1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = -17;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(-18, level);
   TearDownMock();
 }
@@ -266,7 +266,7 @@ TEST(PhasmCoeffHooks, BothSignAndSuffixFireInOrder) {
   RegisterMock({1, 1});  // sign→1 (negate), suffix→1 (flip LSB)
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 17;  // positive
-  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   // Sign first: 17 → -17. Suffix second on -17: |level|=17, LSB=0 →
   // flip to LSB=1 → |level|=18, sign preserved → -18.
   EXPECT_EQ(-18, level);
@@ -278,7 +278,7 @@ TEST(PhasmCoeffHooks, InvalidReturnTreatedAsNoOp) {
   RegisterMock({2});  // not in {-1, 0, 1}
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 5;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks(&pos, 0, 0, 0, &level, /*stego=*/nullptr));
   EXPECT_EQ(5, level);
   TearDownMock();
 }
@@ -287,7 +287,7 @@ TEST(PhasmCoeffHooks, PositionFieldsPopulatedCorrectly) {
   RegisterMock({-1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t level = 5;
-  phasm_apply_coeff_hooks(&pos, /*sub_block=*/11, /*coeff_idx=*/4, /*block_cat=*/2, &level);
+  phasm_apply_coeff_hooks(&pos, /*sub_block=*/11, /*coeff_idx=*/4, /*block_cat=*/2, &level, /*stego=*/nullptr);
   EXPECT_EQ(11,   g_mock_history[0].pos.sub_block);
   EXPECT_EQ(4,    g_mock_history[0].pos.coeff_idx);
   EXPECT_EQ(2,    g_mock_history[0].pos.block_cat);
@@ -306,7 +306,7 @@ TEST(PhasmCoeffHooksDual, NoOverrideLeavesBothUnchanged) {
   RegisterMock({-1, -1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t a = 5, b = 5;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b, /*stego=*/nullptr));
   EXPECT_EQ(5, a);
   EXPECT_EQ(5, b);
   TearDownMock();
@@ -316,7 +316,7 @@ TEST(PhasmCoeffHooksDual, SignFlipUpdatesBoth) {
   RegisterMock({1});  // sign override
   PhasmStegoPos pos = MakeBasePos();
   int16_t a = 5, b = 5;
-  EXPECT_EQ(1, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b));
+  EXPECT_EQ(1, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b, /*stego=*/nullptr));
   EXPECT_EQ(-5, a);
   EXPECT_EQ(-5, b);
   TearDownMock();
@@ -326,7 +326,7 @@ TEST(PhasmCoeffHooksDual, MismatchedAliasesRefuses) {
   RegisterMock({1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t a = 5, b = 6;  // intentionally desynced
-  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b, /*stego=*/nullptr));
   EXPECT_EQ(5, a);  // refused
   EXPECT_EQ(6, b);
   TearDownMock();
@@ -336,7 +336,7 @@ TEST(PhasmCoeffHooksDual, ZeroSkipsDispatch) {
   RegisterMock({1});
   PhasmStegoPos pos = MakeBasePos();
   int16_t a = 0, b = 0;
-  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b));
+  EXPECT_EQ(0, phasm_apply_coeff_hooks_dual(&pos, 0, 0, 0, &a, &b, /*stego=*/nullptr));
   EXPECT_EQ(0u, g_mock_history_count);
   TearDownMock();
 }

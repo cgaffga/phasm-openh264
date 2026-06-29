@@ -519,7 +519,7 @@ void WelsInterMbEncode (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* pCurMb) {
 
   WelsDctMb (pMbCache->pCoeffLevel,  pMbCache->SPicData.pEncMb[0], pEncCtx->pCurDqLayer->iEncStride[0],
              pMbCache->pMemPredLuma, pEncCtx->pFuncList->pfDctFourT4);
-  WelsEncInterY (pEncCtx->pFuncList, pCurMb, pMbCache);
+  WelsEncInterY (pEncCtx->pFuncList, pCurMb, pMbCache, pEncCtx->pPhasmStego);
 }
 
 
@@ -546,7 +546,7 @@ void WelsIMbChromaEncode (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache)
 
   //cb
   pFunc->pfDctFourT4 (pCurRS,    pMbCache->SPicData.pEncMb[1], kiEncStride, pBestPred,    8);
-  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS,    1);
+  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS,    1, pEncCtx->pPhasmStego);
   pFunc->pfIDctFourT4 (pCsCb, kiCsStride, pBestPred,    8, pCurRS);
 
   if (phasm_dr_active) {
@@ -580,7 +580,7 @@ void WelsIMbChromaEncode (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache)
 
   //cr
   pFunc->pfDctFourT4 (pCurRS + 64, pMbCache->SPicData.pEncMb[2], kiEncStride, pBestPred + 64, 8);
-  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS + 64, 2);
+  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS + 64, 2, pEncCtx->pPhasmStego);
   pFunc->pfIDctFourT4 (pCsCr, kiCsStride, pBestPred + 64, 8, pCurRS + 64);
 
   if (phasm_dr_active) {
@@ -623,8 +623,8 @@ void WelsPMbChromaEncode (sWelsEncCtx* pEncCtx, SSlice* pSlice, SMB* pCurMb) {
   pFunc->pfDctFourT4 (pCurRS,       pMbCache->SPicData.pEncMb[1],   kiEncStride,    pBestPred,      8);
   pFunc->pfDctFourT4 (pCurRS + 64,  pMbCache->SPicData.pEncMb[2],   kiEncStride,    pBestPred + 64, 8);
 
-  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS, 1);
-  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS + 64, 2);
+  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS, 1, pEncCtx->pPhasmStego);
+  WelsEncRecUV (pFunc, pCurMb, pMbCache, pCurRS + 64, 2, pEncCtx->pPhasmStego);
 }
 
 void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSlice* pSlice, SMB* pMb) {

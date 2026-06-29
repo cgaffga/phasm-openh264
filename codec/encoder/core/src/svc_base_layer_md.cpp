@@ -83,7 +83,8 @@ static inline void phasm_apply_h_partition_hook(
     uint8_t ref_idx,
     uint8_t iIdx,
     int32_t blockW,
-    int32_t blockH) {
+    int32_t blockH,
+    void* phasm_stego /* B-full.2b (#895): pEncCtx->pPhasmStego */) {
   if (PhasmStegoGetEncPreEmit() == NULL) return;
   uint8_t addr = g_kuiSmb4AddrIn256[iIdx];
   int32_t px = (int32_t)(addr & 0x0f);
@@ -104,6 +105,7 @@ static inline void phasm_apply_h_partition_hook(
   ctx.mv_y_qpel     = &pMe->sMv.iMvY;
   ctx.mvList_x_qpel = NULL;
   ctx.mvList_y_qpel = NULL;
+  ctx.stego         = phasm_stego;
   if (phasm_apply_mvd_hooks(&ctx)) {
     int32_t refLineSize = pCurDqLayer->pRefPic->iLineSize[0];
     pFunc->sMcFuncs.pMcLumaFunc(
@@ -1717,6 +1719,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       phasm_h1_ctx.mv_y_qpel     = &pWelsMd->sMe.sMe16x16.sMv.iMvY;
       phasm_h1_ctx.mvList_x_qpel = &pCurDqLayer->pDecPic->sMvList[pCurMb->iMbXY].iMvX;
       phasm_h1_ctx.mvList_y_qpel = &pCurDqLayer->pDecPic->sMvList[pCurMb->iMbXY].iMvY;
+      phasm_h1_ctx.stego         = pEncCtx->pPhasmStego;
       if (phasm_apply_mvd_hooks(&phasm_h1_ctx)) {
         /* sP16x16Mv refresh (stale post-refine; UpdateP16x16MotionInfo
          * doesn't write it). */
@@ -1777,7 +1780,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe16x8[i],
                                     (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
-                                    (uint8_t)iIdx, 16, 8);
+                                    (uint8_t)iIdx, 16, 8, pEncCtx->pPhasmStego);
       UpdateP16x8MotionInfo (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe16x8[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe16x8[i].sMvp;
       //save the best cost of final mode
@@ -1814,7 +1817,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                     pDstLuma, &pWelsMd->sMe.sMe8x16[i],
                                     (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
-                                    (uint8_t)iIdx, 8, 16);
+                                    (uint8_t)iIdx, 8, 16, pEncCtx->pPhasmStego);
       update_P8x16_motion_info (pMbCache, pCurMb, iIdx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x16[i].sMv);
       pMbCache->sMbMvp[i] = pWelsMd->sMe.sMe8x16[i].sMvp;
       //save the best cost of final mode
@@ -1853,7 +1856,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
         phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                       pDstLuma, &pWelsMd->sMe.sMe8x8[i],
                                       (uint8_t)(i << 2), (uint8_t)pWelsMd->uiRef,
-                                      (uint8_t)iBlk8Idx, 8, 8);
+                                      (uint8_t)iBlk8Idx, 8, 8, pEncCtx->pPhasmStego);
         UpdateP8x8MotionInfo (pMbCache, pCurMb, iBlk8Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x8[i].sMv);
         pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk8Idx]] = pWelsMd->sMe.sMe8x8[i].sMvp;
         iBestSadCost += pWelsMd->sMe.sMe8x8[i].uiSadCost;
@@ -1893,7 +1896,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe4x4[i][j],
                                         (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
-                                        (uint8_t)iBlk4x4Idx, 4, 4);
+                                        (uint8_t)iBlk4x4Idx, 4, 4, pEncCtx->pPhasmStego);
           UpdateP4x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[iBlk4x4Idx]] = pWelsMd->sMe.sMe4x4[i][j].sMvp;
           iBestSadCost += pWelsMd->sMe.sMe4x4[i][j].uiSadCost;
@@ -1934,7 +1937,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe8x4[i][j],
                                         (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
-                                        (uint8_t)iBlk4x4Idx, 8, 4);
+                                        (uint8_t)iBlk4x4Idx, 8, 4, pEncCtx->pPhasmStego);
           UpdateP8x4MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe8x4[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
           //pMbCache->sMbMvp[g_kuiMbCountScan4Idx[1 + iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;
@@ -1975,7 +1978,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
           phasm_apply_h_partition_hook(pCurDqLayer, pFunc, pMbCache, pCurMb,
                                         pDstLuma, &pWelsMd->sMe.sMe4x8[i][j],
                                         (uint8_t)((i << 2) + j), (uint8_t)pWelsMd->uiRef,
-                                        (uint8_t)iBlk4x4Idx, 4, 8);
+                                        (uint8_t)iBlk4x4Idx, 4, 8, pEncCtx->pPhasmStego);
           UpdateP4x8MotionInfo (pMbCache, pCurMb, iBlk4x4Idx, pWelsMd->uiRef, &pWelsMd->sMe.sMe4x8[i][j].sMv);
           pMbCache->sMbMvp[g_kuiMbCountScan4Idx[    iBlk4x4Idx]] = pWelsMd->sMe.sMe4x8[i][j].sMvp;
           //pMbCache->sMbMvp[g_kuiMbCountScan4Idx[4 + iBlk4x4Idx]] = pWelsMd->sMe.sMe8x4[i][j].sMvp;

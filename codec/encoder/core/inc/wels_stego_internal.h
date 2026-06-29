@@ -59,6 +59,10 @@ typedef struct PhasmMvHookCtx {
   int16_t* mv_y_qpel;       /* required */
   int16_t* mvList_x_qpel;   /* optional, NULL OK */
   int16_t* mvList_y_qpel;   /* optional, NULL OK */
+  /* B-full.2b (#895): opaque PhasmStegoState* (pCtx->pPhasmStego) for
+   * the per-encoder bypass scratch; NULL ⇒ mutation path. Set by the
+   * MB-encode caller (svc_base_layer_md.cpp, which has sWelsEncCtx*). */
+  void*    stego;
 } PhasmMvHookCtx;
 
 /* ---------------------------------------------------------------------
@@ -97,11 +101,16 @@ void*                          PhasmStegoGetUserData(void);
  * a sign-bit return outside {0,1,-1}, or a suffix-LSB return outside
  * {0,1,-1}. Refusal = no modification.
  * ------------------------------------------------------------------ */
+/* B-full.2b (#895): `stego` = opaque PhasmStegoState* (pCtx->pPhasmStego)
+ * for the per-encoder bypass-override scratch; NULL ⇒ no scratch (the
+ * mutation path / passthrough). Threaded from the MB-encode call sites
+ * which carry sWelsEncCtx*. */
 int /*bool*/ phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                                      uint8_t sub_block,
                                      uint8_t coeff_idx_scanned,
                                      uint8_t block_cat,
-                                     int16_t* level);
+                                     int16_t* level,
+                                     void* stego);
 
 /* ---------------------------------------------------------------------
  * phasm_apply_coeff_hooks_dual
@@ -122,7 +131,8 @@ int /*bool*/ phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
                                           uint8_t coeff_idx_scanned,
                                           uint8_t block_cat,
                                           int16_t* level_a,
-                                          int16_t* level_b);
+                                          int16_t* level_b,
+                                          void* stego);
 
 /* ---------------------------------------------------------------------
  * phasm_apply_mvd_hooks
@@ -356,10 +366,14 @@ void           phasm_reset_slice_override_count(void);
  * Pre-4.5.b: no callers populate, scratch stays zero-init, and the
  * Phase 4.2-4.4 emit-side hooks return orig_bin unconditionally.
  * Byte-identical to the Phase 4.4 ship. */
-void phasm_reset_bypass_overrides(void);
+/* B-full.2b (#895): all three take `stego` = opaque PhasmStegoState*
+ * (pCtx->pPhasmStego) — the per-encoder bypass scratch home. NULL ⇒
+ * no-op / passthrough. */
+void phasm_reset_bypass_overrides(void* stego);
 void phasm_set_bypass_override(uint8_t domain,
                                 const PhasmStegoPos* pos,
-                                int override_bin);
+                                int override_bin,
+                                void* stego);
 
 /* ---------------------------------------------------------------------
  * Phase 4.5.b (#538) — wire-only mode gate.

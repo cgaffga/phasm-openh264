@@ -52,8 +52,13 @@ void WelsDctMb (int16_t* pRs, uint8_t* pEncMb, int32_t iEncStride, uint8_t* pBes
 
 void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache);
 void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uint8_t uiI4x4Idx);
-void WelsEncInterY (SWelsFuncPtrList* func, SMB* pCurMb, SMbCache* pMbCache);
-void WelsEncRecUV (SWelsFuncPtrList* func, SMB* pCurMb, SMbCache* pMbCache, int16_t* pRs, int32_t iUV);
+/* B-full.2b (#895): `phasm_stego` = opaque PhasmStegoState*
+ * (pEncCtx->pPhasmStego) threaded from the slice-encode caller so the
+ * inter/chroma coeff-hooks can populate the per-encoder bypass scratch.
+ * These two take SWelsFuncPtrList* (not sWelsEncCtx*), hence the extra
+ * pass-through. NULL ⇒ no scratch. */
+void WelsEncInterY (SWelsFuncPtrList* func, SMB* pCurMb, SMbCache* pMbCache, void* phasm_stego);
+void WelsEncRecUV (SWelsFuncPtrList* func, SMB* pCurMb, SMbCache* pMbCache, int16_t* pRs, int32_t iUV, void* phasm_stego);
 void WelsRecPskip (SDqLayer* pCurDq, SWelsFuncPtrList* pFunc, SMB* pCurMb, SMbCache* pMbCache);
 
 bool WelsTryPYskip (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache);

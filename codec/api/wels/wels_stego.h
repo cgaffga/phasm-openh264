@@ -571,9 +571,13 @@ void phasm_advance_replay_coeffs(int32_t n);
  *
  * Returning `-1` is reserved for callbacks that don't want to
  * override; the caller treats it as "emit `orig_bin`". */
+/* B-full.2b (#895): `stego` = opaque PhasmStegoState* carrying the
+ * per-encoder bypass-override scratch (pSlice->sCabacCtx.pPhasmStego at
+ * the CABAC emit sites). NULL ⇒ no scratch ⇒ returns `orig_bin`. */
 int phasm_apply_bypass_bin_override (uint8_t domain,
                                       const PhasmStegoPos* pos,
-                                      int orig_bin);
+                                      int orig_bin,
+                                      void* stego);
 
 /* Phase 4.5.b (#538) — wire-only override mode gate.
  *

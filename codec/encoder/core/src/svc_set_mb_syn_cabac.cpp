@@ -158,7 +158,7 @@ static inline void WelsCabacEncodeUeBypassWithPhasmLsbOverride (
         if (k == 0) {
           /* LSB iteration — route through phasm hook. */
           const int phasm_bin = phasm_apply_bypass_bin_override (
-              phasm_domain, phasm_pos, (int)orig_bin);
+              phasm_domain, phasm_pos, (int)orig_bin, pCbCtx->pPhasmStego);
           WelsCabacEncodeBypassOne (pCbCtx, phasm_bin);
         } else {
           WelsCabacEncodeBypassOne (pCbCtx, orig_bin);
@@ -477,7 +477,7 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
       }
       WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 0);
       const int phasm_bin = phasm_apply_bypass_bin_override (
-          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign);
+          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign, pCabacCtx->pPhasmStego);
       WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
     } else {
       WelsCabacEncodeDecision (pCabacCtx, iCtx + iCtxInc, 1);
@@ -499,7 +499,7 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
           pCabacCtx, 3, (uint32_t)(iAbsMvd - 9),
           (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &phasm_pos_msl);
       const int phasm_bin = phasm_apply_bypass_bin_override (
-          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign);
+          (uint8_t)PHASM_DOMAIN_MVD_SIGN, &phasm_pos, phasm_orig_sign, pCabacCtx->pPhasmStego);
       WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
     }
   } else {
@@ -575,7 +575,7 @@ SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
       aphasm_pos._reserved     = 0;
       const int32_t aphasm_orig_lsb = (aphasm_abs - 9) & 1;
       const int32_t aphasm_emitted = phasm_apply_bypass_bin_override (
-          (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &aphasm_pos, aphasm_orig_lsb);
+          (uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &aphasm_pos, aphasm_orig_lsb, pCabacCtx->pPhasmStego);
       if (aphasm_emitted != aphasm_orig_lsb) {
         const int32_t aphasm_new = (aphasm_orig_lsb == 0) ? (aphasm_abs + 1)
                                                           : (aphasm_abs - 1);
@@ -849,7 +849,7 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
         phasm_pos._reserved     = 0;
         const int phasm_orig_sign = (iLevel[iNonZeroIdx] < 0) ? 1 : 0;
         const int phasm_bin = phasm_apply_bypass_bin_override (
-            (uint8_t)PHASM_DOMAIN_COEFF_SIGN, &phasm_pos, phasm_orig_sign);
+            (uint8_t)PHASM_DOMAIN_COEFF_SIGN, &phasm_pos, phasm_orig_sign, pCabacCtx->pPhasmStego);
         WelsCabacEncodeBypassOne (pCabacCtx, phasm_bin);
       }
     } while (iNonZeroIdx > 0);

@@ -75,23 +75,19 @@ static int g_phasm_use_wire_only_overrides = 0;
  * Sentinel initial values (`0xFFFFFFFF` / `0xFFFF`) ensure the very
  * first populate-hook fire of every encoder lifetime triggers a
  * reset — startup state always starts clean. */
-static uint32_t g_phasm_last_mb_frame_num = 0xFFFFFFFFu;
-static uint16_t g_phasm_last_mb_x         = 0xFFFFu;
-static uint16_t g_phasm_last_mb_y         = 0xFFFFu;
-
-static inline void phasm_maybe_reset_for_mb(uint32_t frame_num,
-                                             uint16_t mb_x,
-                                             uint16_t mb_y) {
-  if (!g_phasm_use_wire_only_overrides) return;
-  if (frame_num != g_phasm_last_mb_frame_num ||
-      mb_x      != g_phasm_last_mb_x ||
-      mb_y      != g_phasm_last_mb_y) {
-    phasm_reset_bypass_overrides();
-    g_phasm_last_mb_frame_num = frame_num;
-    g_phasm_last_mb_x         = mb_x;
-    g_phasm_last_mb_y         = mb_y;
-  }
-}
+/* B-full.2b (#895): the (frame_num, mb_x, mb_y) sentinels + the bypass
+ * scratch they guard now live per-encoder on PhasmStegoState
+ * (pCtx->pPhasmStego), not in process-globals — the prerequisite for
+ * thread-safe concurrent stego encode (parallel-GOP, doc §12). The
+ * wire_only gate (read below) stays a process-global until B-full.5.
+ * phasm_maybe_reset_for_mb is forward-declared here (it needs the
+ * PhasmStegoState definition, which appears further down) and defined
+ * just after that struct. */
+struct PhasmStegoState;
+static void phasm_maybe_reset_for_mb(void* stego_v,
+                                     uint32_t frame_num,
+                                     uint16_t mb_x,
+                                     uint16_t mb_y);
 
 // =====================================================================
 // Phase A.5 Stage 0+ encoder-side helpers.
@@ -209,7 +205,8 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
                                    uint8_t sub_block,
                                    uint8_t coeff_idx_scanned,
                                    uint8_t block_cat,
-                                   int16_t level) {
+                                   int16_t level,
+                                   void* stego) {
   pos->sub_block    = sub_block;
   pos->coeff_idx    = coeff_idx_scanned;
   pos->block_cat    = block_cat;
@@ -220,8 +217,9 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   const int wire_only = g_phasm_use_wire_only_overrides;
   /* Phase 4.5.e — clear stale scratch from previous MB before this
    * MB's first populate-hook fires. No-op on subsequent fires
-   * within the same MB; pure no-op under flag OFF. */
-  phasm_maybe_reset_for_mb(pos->frame_num, pos->mb_x, pos->mb_y);
+   * within the same MB; pure no-op under flag OFF. B-full.2b: scratch
+   * + sentinels are per-encoder (stego); NULL ⇒ no-op. */
+  phasm_maybe_reset_for_mb(stego, pos->frame_num, pos->mb_x, pos->mb_y);
 
   /* Phase 4.5.d.3 + #538.4.7 chroma fix — per-block_cat key derivation
    * for the scratch-table slot. The Rust PositionKey contract is
@@ -299,7 +297,7 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
         PhasmStegoPos scratch_pos = *pos;
         scratch_pos.sub_block = scratch_sub_block;
         scratch_pos.coeff_idx = scratch_coeff_idx;
-        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, &scratch_pos, override_sign);
+        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SIGN, &scratch_pos, override_sign, stego);
       } else {
         int16_t new_level = apply_sign_override(level, override_sign);
         if (new_level != 0) {
@@ -369,7 +367,7 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
           PhasmStegoPos scratch_pos = *pos;
           scratch_pos.sub_block = scratch_sub_block;
           scratch_pos.coeff_idx = scratch_coeff_idx;
-          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb ^ 1);
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_COEFF_SUFFIX_LSB, &scratch_pos, override_lsb ^ 1, stego);
         } else {
           int16_t new_level = apply_suffix_lsb_coeff(level, override_lsb);
           if (new_level != 0) {
@@ -406,7 +404,8 @@ int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                             uint8_t sub_block,
                             uint8_t coeff_idx_scanned,
                             uint8_t block_cat,
-                            int16_t* level) {
+                            int16_t* level,
+                            void* stego) {
   if (level == nullptr) return 0;
   if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
 
@@ -419,7 +418,7 @@ int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
   int16_t old_level = *level;
   *level = apply_coeff_hooks_to_level(pos_template, sub_block,
                                       coeff_idx_scanned, block_cat,
-                                      old_level);
+                                      old_level, stego);
   if (*level != old_level) {
     g_phasm_hook_single_applied.fetch_add(1, std::memory_order_relaxed);
     phasm_inc_slice_override_count();  // C.9.2 (#450)
@@ -433,7 +432,8 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
                                  uint8_t coeff_idx_scanned,
                                  uint8_t block_cat,
                                  int16_t* level_a,
-                                 int16_t* level_b) {
+                                 int16_t* level_b,
+                                 void* stego) {
   if (level_a == nullptr || level_b == nullptr) return 0;
   if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
 
@@ -455,7 +455,7 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
   int16_t old_level = *level_a;
   int16_t new_level = apply_coeff_hooks_to_level(pos_template, sub_block,
                                                   coeff_idx_scanned, block_cat,
-                                                  old_level);
+                                                  old_level, stego);
   if (new_level != old_level) {
     *level_a = new_level;
     *level_b = new_level;
@@ -578,7 +578,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
 
   /* Phase 4.5.e — clear stale scratch from previous MB. Pure no-op
    * under flag OFF. */
-  phasm_maybe_reset_for_mb(ctx->frame_num, ctx->mb_x, ctx->mb_y);
+  phasm_maybe_reset_for_mb(ctx->stego, ctx->frame_num, ctx->mb_x, ctx->mb_y);
 
   PhasmStegoPos pos;
   pos.frame_num     = ctx->frame_num;
@@ -612,7 +612,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
       if (wire_only) {
         /* Populate scratch — emit-side bypass-bin hook will flip
          * the wire bit. Encoder state stays unchanged. */
-        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SIGN, &pos, ovr_sign);
+        phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SIGN, &pos, ovr_sign, ctx->stego);
         wire_only_any_override = 1;
       } else {
         mv_out[comp] = apply_mvd_sign_override(mv_in[comp], mvp[comp]);
@@ -634,7 +634,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
       int32_t ovr_lsb = cb(&pos, orig_lsb, user_data);
       if ((ovr_lsb == 0 || ovr_lsb == 1) && ovr_lsb != orig_lsb) {
         if (wire_only) {
-          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &pos, ovr_lsb);
+          phasm_set_bypass_override((uint8_t)PHASM_DOMAIN_MVD_SUFFIX_LSB, &pos, ovr_lsb, ctx->stego);
           wire_only_any_override = 1;
         } else {
           mv_out[comp] = apply_mvd_suffix_lsb(mv_out[comp], mvp[comp], ovr_lsb);
@@ -743,7 +743,10 @@ struct PhasmBypassOverrides {
                           [PHASM_SCRATCH_MV_COMP_MAX];
 };
 
-static PhasmBypassOverrides g_phasm_bypass_overrides;
+/* B-full.2b (#895): the bypass-override scratch table moved off this
+ * process-global into PhasmStegoState::bypass_overrides (per-encoder) —
+ * so concurrent encoders (parallel-GOP, doc §12) don't collide. The
+ * wire-only gate stays a file-scope global until B-full.5. */
 
 /* Phase 4.5.b — wire-only mode gate setters/getter (extern "C"). The
  * static variable itself is defined at file scope earlier in this TU
@@ -780,13 +783,40 @@ extern "C" void phasm_stego_state_destroy(void* p) {
   delete static_cast<PhasmStegoState*>(p);  // delete nullptr is a no-op
 }
 
+/* B-full.2b (#895) — per-MB scratch reset, now keyed off the per-encoder
+ * PhasmStegoState (forward-declared at the top of this TU). NULL stego ⇒
+ * no-op (non-phasm encode). Still gated on the process-global wire_only
+ * flag, which migrates to per-instance in B-full.5. */
+static void phasm_maybe_reset_for_mb(void* stego_v,
+                                     uint32_t frame_num,
+                                     uint16_t mb_x,
+                                     uint16_t mb_y) {
+  if (!g_phasm_use_wire_only_overrides) return;
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  if (frame_num != st->last_mb_frame_num ||
+      mb_x      != st->last_mb_x ||
+      mb_y      != st->last_mb_y) {
+    phasm_reset_bypass_overrides(stego_v);
+    st->last_mb_frame_num = frame_num;
+    st->last_mb_x         = mb_x;
+    st->last_mb_y         = mb_y;
+  }
+}
+
 /* Internal helper: validate slot indices for the given domain and
  * return a pointer to the slot byte, or nullptr if any index is out
  * of range. Used by both the populate side (`phasm_set_bypass_override`)
  * and the read side (`phasm_apply_bypass_bin_override`). */
 static uint8_t* phasm_scratch_slot(uint8_t domain,
-                                    const PhasmStegoPos* pos) {
+                                    const PhasmStegoPos* pos,
+                                    void* stego_v) {
   if (pos == nullptr) return nullptr;
+  /* B-full.2b: the scratch table is per-encoder (PhasmStegoState).
+   * NULL stego ⇒ no scratch (non-phasm encode) ⇒ no slot. */
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return nullptr;
+  PhasmBypassOverrides& ov = st->bypass_overrides;
   switch (domain) {
     case PHASM_DOMAIN_COEFF_SIGN:
     case PHASM_DOMAIN_COEFF_SUFFIX_LSB: {
@@ -794,11 +824,9 @@ static uint8_t* phasm_scratch_slot(uint8_t domain,
       if (pos->sub_block >= PHASM_SCRATCH_SUB_BLOCK_MAX)   return nullptr;
       if (pos->coeff_idx >= PHASM_SCRATCH_COEFF_IDX_MAX)   return nullptr;
       if (domain == PHASM_DOMAIN_COEFF_SIGN) {
-        return &g_phasm_bypass_overrides
-                  .coeff_sign[pos->block_cat][pos->sub_block][pos->coeff_idx];
+        return &ov.coeff_sign[pos->block_cat][pos->sub_block][pos->coeff_idx];
       } else {
-        return &g_phasm_bypass_overrides
-                  .coeff_suffix_lsb[pos->block_cat][pos->sub_block][pos->coeff_idx];
+        return &ov.coeff_suffix_lsb[pos->block_cat][pos->sub_block][pos->coeff_idx];
       }
     }
     case PHASM_DOMAIN_MVD_SIGN:
@@ -806,11 +834,9 @@ static uint8_t* phasm_scratch_slot(uint8_t domain,
       if (pos->partition_idx >= PHASM_SCRATCH_PARTITION_MAX) return nullptr;
       if (pos->mv_component >= PHASM_SCRATCH_MV_COMP_MAX)    return nullptr;
       if (domain == PHASM_DOMAIN_MVD_SIGN) {
-        return &g_phasm_bypass_overrides
-                  .mvd_sign[pos->partition_idx][pos->mv_component];
+        return &ov.mvd_sign[pos->partition_idx][pos->mv_component];
       } else {
-        return &g_phasm_bypass_overrides
-                  .mvd_suffix_lsb[pos->partition_idx][pos->mv_component];
+        return &ov.mvd_suffix_lsb[pos->partition_idx][pos->mv_component];
       }
     }
     default:
@@ -844,36 +870,36 @@ void phasm_diag_reset_counters(void) {
   g_phasm_diag_reset_calls.store(0);
 }
 
-void phasm_reset_bypass_overrides(void) {
+void phasm_reset_bypass_overrides(void* stego_v) {
   /* Zero-init = "no override" across the whole table. memset is
-   * cheap (~2.6 KB, fits in one cache line per array element row). */
-  std::memset(&g_phasm_bypass_overrides, 0, sizeof(g_phasm_bypass_overrides));
+   * cheap (~2.6 KB, fits in one cache line per array element row).
+   * B-full.2b: the table is per-encoder; NULL stego ⇒ no-op. */
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  std::memset(&st->bypass_overrides, 0, sizeof(st->bypass_overrides));
   g_phasm_diag_reset_calls.fetch_add(1, std::memory_order_relaxed);
 }
 
-/* #548 v1.0 BLOCKER fix (2026-05-18) — Reset ALL libencoder-private
- * phasm globals at start of every new encode session. Cross-call
- * state-leak: a second sequential `encode_yuv_with_pre_framed_bits_4domain`
- * call produced 541 ChromaAc CS Sign diffs (vs 0 on the first call,
- * same YUV + same params) because some phasm-fork global was holding
- * state across the encoder-instance teardown.
+/* #548 v1.0 BLOCKER fix (2026-05-18) — Reset libencoder-private phasm
+ * state at the start of every new encode session. The original bug was a
+ * cross-call state-leak: a second sequential
+ * `encode_yuv_with_pre_framed_bits_4domain` produced 541 ChromaAc CS Sign
+ * diffs (vs 0 on the first call) because a phasm-fork global held state
+ * across the encoder-instance teardown.
  *
- * Resets:
- *   - g_phasm_bypass_overrides    (scratch table)
- *   - g_phasm_last_mb_*           (sentinel state for scratch reset)
- *   - g_phasm_use_wire_only_overrides (defensive; orchestrator
- *                                     already resets after Pass 2 but
- *                                     belt-and-braces)
+ * B-full.2b (#895): the scratch table + the (frame_num,mb_x,mb_y)
+ * sentinels are now per-encoder (PhasmStegoState), allocated fresh +
+ * zero-init in WelsInitEncoderExt and freed in FreeMemorySvc. The
+ * cross-call leak is therefore IMPOSSIBLE by construction — each new
+ * encoder owns clean state — so this function no longer resets them
+ * (there's no instance to reach from here anyway; it's called on the
+ * orchestrator thread with no handle). It still clears the process-global
+ * wire_only flag (migrates to per-instance in B-full.5) + diag counters.
  *
- * Caller (the Rust orchestrator) is responsible for resetting the
- * libcommon-side state (`phasm_reset_dirty_flags()`,
- * `phasm_clear_mv_clean_mc_stash()`, etc.) — those have their own
- * extern "C" entry points in wels_stego_common.cpp. */
+ * Caller (the Rust orchestrator) still resets the libcommon-side state
+ * (`phasm_reset_dirty_flags()`, `phasm_clear_mv_clean_mc_stash()`, …) via
+ * their own extern "C" entry points in wels_stego_common.cpp. */
 void phasm_reset_encoder_session_state(void) {
-  std::memset(&g_phasm_bypass_overrides, 0, sizeof(g_phasm_bypass_overrides));
-  g_phasm_last_mb_frame_num = 0xFFFFFFFFu;
-  g_phasm_last_mb_x         = 0xFFFFu;
-  g_phasm_last_mb_y         = 0xFFFFu;
   g_phasm_use_wire_only_overrides = 0;
   g_phasm_diag_reset_calls.fetch_add(1, std::memory_order_relaxed);
 }
@@ -886,10 +912,11 @@ void phasm_reset_encoder_session_state(void) {
  * helpers' behaviour of silently refusing illegal mutations). */
 void phasm_set_bypass_override(uint8_t domain,
                                 const PhasmStegoPos* pos,
-                                int override_bin) {
+                                int override_bin,
+                                void* stego) {
   g_phasm_diag_set_calls.fetch_add(1, std::memory_order_relaxed);
   if (override_bin != 0 && override_bin != 1) return;
-  uint8_t* slot = phasm_scratch_slot(domain, pos);
+  uint8_t* slot = phasm_scratch_slot(domain, pos, stego);
   if (slot == nullptr) {
     g_phasm_diag_set_rejected_oob.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -901,9 +928,10 @@ void phasm_set_bypass_override(uint8_t domain,
 /* Phase 4.5.a wire-up: read scratch at emit time. */
 int phasm_apply_bypass_bin_override (uint8_t domain,
                                       const PhasmStegoPos* pos,
-                                      int orig_bin) {
+                                      int orig_bin,
+                                      void* stego) {
   g_phasm_diag_apply_calls.fetch_add(1, std::memory_order_relaxed);
-  uint8_t* slot = phasm_scratch_slot(domain, pos);
+  uint8_t* slot = phasm_scratch_slot(domain, pos, stego);
   if (slot == nullptr) return orig_bin;
   const uint8_t v = *slot;
   if (v == 0) return orig_bin;
