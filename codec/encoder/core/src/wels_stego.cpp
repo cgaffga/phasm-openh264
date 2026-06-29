@@ -143,11 +143,11 @@ int16_t apply_suffix_lsb_coeff(int16_t level, int new_lsb_bit) {
 // Dispatch a single hook call. Returns the callback's return value, or
 // -1 if no callback registered. Sets pos->domain before calling.
 int32_t dispatch_hook(PhasmStegoPos* pos, PhasmStegoDomain domain,
-                      int32_t original_bit) {
+                      int32_t original_bit, void* stego) {
   PhasmStegoEncPreEmitFn cb = PhasmStegoGetEncPreEmit();
   if (cb == nullptr) return -1;
   pos->domain = (uint8_t)domain;
-  return cb(pos, original_bit, PhasmStegoGetUserData());
+  return cb(pos, original_bit, phasm_stego_get_user_data(stego));
 }
 
 /* #538 Phase 4.5.d.3 — inverse 4x4 zigzag (raster → scan). Inverse
@@ -286,7 +286,7 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   }
 
   int32_t orig_sign = (level < 0) ? 1 : 0;
-  int32_t override_sign = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SIGN, orig_sign);
+  int32_t override_sign = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SIGN, orig_sign, stego);
   if (override_sign == 0 || override_sign == 1) {
     if (override_sign != orig_sign) {
       if (wire_only) {
@@ -336,7 +336,7 @@ int16_t apply_coeff_hooks_to_level(PhasmStegoPos* pos,
   // `memory/h264_chroma_csl_cascade_gap_504.md`.
   if (abs_level_for_check >= 16) {
     int32_t orig_lsb = (abs_level_for_check - 15) & 1;
-    int32_t override_lsb = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SUFFIX_LSB, orig_lsb);
+    int32_t override_lsb = dispatch_hook(pos, PHASM_DOMAIN_COEFF_SUFFIX_LSB, orig_lsb, stego);
     if (override_lsb == 0 || override_lsb == 1) {
       if (override_lsb != orig_lsb) {
         if (wire_only) {
@@ -517,7 +517,8 @@ int phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
 }
 
 void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
-                        uint32_t internal_mb_type, uint8_t cbp) {
+                        uint32_t internal_mb_type, uint8_t cbp,
+                        void* stego) {
   PhasmStegoMdCostFn cb = PhasmStegoGetMdCostCapture();
   if (cb == nullptr) return;
 
@@ -537,7 +538,7 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
   }
 
   PhasmStegoMdCost cost;
-  cost.frame_num   = PhasmStegoGetFrameNum();
+  cost.frame_num   = phasm_stego_get_frame_num(stego);
   cost.mb_x        = mb_x;
   cost.mb_y        = mb_y;
   cost.mb_type     = klass;
@@ -547,25 +548,26 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
   cost.capacity[1] = 0;
   cost.capacity[2] = 0;
   cost.capacity[3] = 0;
-  cb(&cost, PhasmStegoGetUserData());
+  cb(&cost, phasm_stego_get_user_data(stego));
 }
 
-void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision) {
+void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision, void* stego) {
   if (decision == nullptr) return;
-  if (PhasmStegoGetPassMode() != PHASM_PASS_CAPTURE) return;
+  if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_CAPTURE) return;
   PhasmStegoCaptureMbDecisionFn cb = PhasmStegoGetCaptureMbDecision();
   if (cb == nullptr) return;
-  cb(decision, PhasmStegoGetUserData());
+  cb(decision, phasm_stego_get_user_data(stego));
 }
 
 int phasm_fetch_replay_decision(uint16_t mb_x, uint16_t mb_y,
-                                PhasmStegoMbDecision* out_decision) {
+                                PhasmStegoMbDecision* out_decision,
+                                void* stego) {
   if (out_decision == nullptr) return 0;
-  if (PhasmStegoGetPassMode() != PHASM_PASS_REPLAY) return 0;
+  if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_REPLAY) return 0;
   PhasmStegoReplayMbDecisionFn cb = PhasmStegoGetReplayMbDecision();
   if (cb == nullptr) return 0;
-  return cb(PhasmStegoGetFrameNum(), mb_x, mb_y, out_decision,
-            PhasmStegoGetUserData());
+  return cb(phasm_stego_get_frame_num(stego), mb_x, mb_y, out_decision,
+            phasm_stego_get_user_data(stego));
 }
 
 int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
@@ -574,7 +576,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   }
   PhasmStegoEncPreEmitFn cb = PhasmStegoGetEncPreEmit();
   if (cb == nullptr) return 0;
-  void* user_data = PhasmStegoGetUserData();
+  void* user_data = phasm_stego_get_user_data(ctx->stego);
 
   /* Phase 4.5.e — clear stale scratch from previous MB. Pure no-op
    * under flag OFF. */
@@ -773,6 +775,19 @@ struct PhasmStegoState {
   uint16_t             last_mb_x;
   uint16_t             last_mb_y;
   int                  use_wire_only_overrides;
+  // B-full.3 (#895): per-encoder session state, migrated off the libcommon
+  // process-globals (g_phasm_frame_num / g_phasm_pass_mode / g_phasm_user_data)
+  // so concurrent encoder instances (parallel-GOP, 4b) each carry their own.
+  // `has_session_state` gates per-instance vs global-fallback reads: production
+  // wires these via phasm_stego_state_set_* after Encoder::new; the dormant
+  // decoder + whole-video test paths leave them 0 and the get-helpers below
+  // fall back to the libcommon globals. The callback FUNCTION POINTERS stay
+  // global (identical Rust trampolines across instances — race-free); only the
+  // per-session DATA varies per instance, so only the data lives here.
+  uint32_t             frame_num;
+  PhasmStegoPassMode   pass_mode;
+  void*                user_data;
+  int                  has_session_state;
 };
 
 extern "C" void* phasm_stego_state_create(void) {
@@ -781,6 +796,55 @@ extern "C" void* phasm_stego_state_create(void) {
 
 extern "C" void phasm_stego_state_destroy(void* p) {
   delete static_cast<PhasmStegoState*>(p);  // delete nullptr is a no-op
+}
+
+// B-full.3 (#895): per-instance session-state setters. The Rust orchestrator
+// calls these (with the void* from phasm_encoder_get_stego_state) AFTER
+// Encoder::new, mirroring what the libcommon globals would hold. Setting any of
+// them marks the instance "session-active" so the per-MB read-helpers below
+// read per-instance instead of falling back to the globals. NULL stego ⇒ no-op.
+extern "C" void phasm_stego_state_set_frame_num(void* stego_v, uint32_t frame_num) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->frame_num = frame_num;
+  st->has_session_state = 1;
+}
+
+extern "C" void phasm_stego_state_set_pass_mode(void* stego_v, PhasmStegoPassMode mode) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->pass_mode = mode;
+  st->has_session_state = 1;
+}
+
+extern "C" void phasm_stego_state_set_user_data(void* stego_v, void* user_data) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->user_data = user_data;
+  st->has_session_state = 1;
+}
+
+// Per-MB read-helpers: per-instance when the instance is session-active, else
+// the libcommon global (dormant decoder + whole-video test paths, where
+// has_session_state stays 0). NULL stego ⇒ global. The hot-path branch is a
+// single predictable predicate; the global fallback reads exactly what these
+// sites read pre-migration, so an unwired instance is byte-identical.
+extern "C" uint32_t phasm_stego_get_frame_num(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->frame_num
+                                                  : PhasmStegoGetFrameNum();
+}
+
+extern "C" PhasmStegoPassMode phasm_stego_get_pass_mode(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->pass_mode
+                                                  : PhasmStegoGetPassMode();
+}
+
+extern "C" void* phasm_stego_get_user_data(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->user_data
+                                                  : PhasmStegoGetUserData();
 }
 
 /* B-full.2b (#895) — per-MB scratch reset, now keyed off the per-encoder

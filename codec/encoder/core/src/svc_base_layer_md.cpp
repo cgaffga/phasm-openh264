@@ -90,7 +90,7 @@ static inline void phasm_apply_h_partition_hook(
   int32_t px = (int32_t)(addr & 0x0f);
   int32_t py = (int32_t)(addr >> 4);
   PhasmMvHookCtx ctx;
-  ctx.frame_num     = PhasmStegoGetFrameNum();
+  ctx.frame_num     = phasm_stego_get_frame_num(phasm_stego);
   ctx.mb_x          = (uint16_t)pCurMb->iMbX;
   ctx.mb_y          = (uint16_t)pCurMb->iMbY;
   ctx.partition_idx = partition_idx;
@@ -1704,7 +1704,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
       SMVUnitXY phasm_pred_skip;
       PredSkipMv(pMbCache, &phasm_pred_skip);
       PhasmMvHookCtx phasm_h1_ctx;
-      phasm_h1_ctx.frame_num     = PhasmStegoGetFrameNum();
+      phasm_h1_ctx.frame_num     = phasm_stego_get_frame_num(pEncCtx->pPhasmStego);
       phasm_h1_ctx.mb_x          = (uint16_t)pCurMb->iMbX;
       phasm_h1_ctx.mb_y          = (uint16_t)pCurMb->iMbY;
       phasm_h1_ctx.partition_idx = 0;
@@ -2063,7 +2063,7 @@ bool WelsMdFirstIntraMode (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurMb, 
  *       could undo our override on uiCbp==0 boundary cases). */
 static int phasm_replay_inter_override (sWelsEncCtx* pEncCtx, SSlice* pSlice,
                                          SMB* pCurMb, SMbCache* pMbCache) {
-  if (PhasmStegoGetPassMode() != PHASM_PASS_REPLAY) return 0;
+  if (phasm_stego_get_pass_mode(pEncCtx->pPhasmStego) != PHASM_PASS_REPLAY) return 0;
   /* #549 v1.0 HOTFIX (2026-05-19): bypass cache-application path.
    * See `memory/h264_549_real_content_regression_findings.md` for
    * rationale. Forced-miss test proved Pass 1 ≡ Pass 2 when override
@@ -2071,7 +2071,7 @@ static int phasm_replay_inter_override (sWelsEncCtx* pEncCtx, SSlice* pSlice,
   return 0;
   PhasmStegoMbDecision d;
   if (!phasm_fetch_replay_decision ((uint16_t)pCurMb->iMbX,
-                                    (uint16_t)pCurMb->iMbY, &d)) return 0;
+                                    (uint16_t)pCurMb->iMbY, &d, pEncCtx->pPhasmStego)) return 0;
 
   SDqLayer* pCurDqLayer = pEncCtx->pCurDqLayer;
 

@@ -455,7 +455,7 @@ inline void WelsCabacMbMvdLx (SCabacCtx* pCabacCtx, int32_t sMvd, int32_t iCtx, 
 
   if (iPrefix) {
     PhasmStegoPos phasm_pos;
-    phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos.frame_num     = phasm_stego_get_frame_num(pCabacCtx->pPhasmStego);
     phasm_pos.mb_x          = phasm_mb_x;
     phasm_pos.mb_y          = phasm_mb_y;
     phasm_pos.partition_idx = phasm_partition_id;
@@ -562,7 +562,7 @@ SMVUnitXY WelsCabacMbMvd (SCabacCtx* pCabacCtx, SMB* pCurMb, uint32_t iMbWidth,
       const int32_t aphasm_abs = WELS_ABS (aphasm_mvd[aphasm_c]);
       if (aphasm_abs < 9) continue;
       PhasmStegoPos aphasm_pos;
-      aphasm_pos.frame_num     = PhasmStegoGetFrameNum();
+      aphasm_pos.frame_num     = phasm_stego_get_frame_num(pCabacCtx->pPhasmStego);
       aphasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
       aphasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
       aphasm_pos.partition_idx = phasm_partition_id;
@@ -786,7 +786,7 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
             phasm_coeff_idx_csl = (uint8_t)phasm_scan_pos;
           }
           PhasmStegoPos phasm_pos_csl;
-          phasm_pos_csl.frame_num     = PhasmStegoGetFrameNum();
+          phasm_pos_csl.frame_num     = phasm_stego_get_frame_num(pCabacCtx->pPhasmStego);
           phasm_pos_csl.mb_x          = (uint16_t)pCurMb->iMbX;
           phasm_pos_csl.mb_y          = (uint16_t)pCurMb->iMbY;
           phasm_pos_csl.partition_idx = 0;
@@ -836,7 +836,7 @@ void  WelsWriteBlockResidualCabac (SMbCache* pMbCache, SMB* pCurMb, uint32_t iMb
           phasm_coeff_idx = (uint8_t)phasm_scan_pos;
         }
         PhasmStegoPos phasm_pos;
-        phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+        phasm_pos.frame_num     = phasm_stego_get_frame_num(pCabacCtx->pPhasmStego);
         phasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
         phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
         phasm_pos.partition_idx = 0;

@@ -82,6 +82,30 @@ PhasmStegoPassMode             PhasmStegoGetPassMode(void);
 void*                          PhasmStegoGetUserData(void);
 
 /* ---------------------------------------------------------------------
+ * B-full.3 (#895): per-encoder session-state accessors + setters.
+ *
+ * frame_num / pass_mode / user_data migrate off the libcommon process-
+ * globals onto the per-encoder PhasmStegoState (pCtx->pPhasmStego) so
+ * concurrent encoder instances (parallel-GOP, 4b) don't collide. The
+ * callback FUNCTION POINTERS stay global (identical Rust trampolines —
+ * race-free); only the per-session DATA varies per instance.
+ *
+ * The get-helpers take the opaque PhasmStegoState* and return the per-
+ * instance value when the instance is "session-active" (any setter was
+ * called), else fall back to the libcommon global so the dormant decoder
+ * + whole-video test paths keep working unchanged. NULL stego ⇒ global.
+ *
+ * The setters are called from the Rust orchestrator (with the void* from
+ * phasm_encoder_get_stego_state) AFTER Encoder::new.
+ * ------------------------------------------------------------------ */
+uint32_t           phasm_stego_get_frame_num(void* stego);
+PhasmStegoPassMode phasm_stego_get_pass_mode(void* stego);
+void*              phasm_stego_get_user_data(void* stego);
+void phasm_stego_state_set_frame_num(void* stego, uint32_t frame_num);
+void phasm_stego_state_set_pass_mode(void* stego, PhasmStegoPassMode mode);
+void phasm_stego_state_set_user_data(void* stego, void* user_data);
+
+/* ---------------------------------------------------------------------
  * phasm_apply_coeff_hooks
  *
  * Fire coeff_sign + coeff_suffix_lsb hooks on a single non-zero
@@ -179,7 +203,8 @@ int /*bool*/ phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
  * mb_x + mb_y read, a 6-way switch on uiMbType, and the dispatch.
  * ------------------------------------------------------------------ */
 void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
-                        uint32_t internal_mb_type, uint8_t cbp);
+                        uint32_t internal_mb_type, uint8_t cbp,
+                        void* stego);
 
 /* ---------------------------------------------------------------------
  * phasm_emit_mb_decision (#533.2 Pass-2 replay)
@@ -194,7 +219,7 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
  * effect and a `capture_mb_decision` callback is registered. The
  * hot path on disabled pass-mode is two function-pointer reads.
  * ------------------------------------------------------------------ */
-void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision);
+void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision, void* stego);
 
 /* ---------------------------------------------------------------------
  * phasm_fetch_replay_decision (#533.3 Pass-2 replay)
@@ -209,7 +234,8 @@ void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision);
  * RDO/ME and reconstruct from the cached decision directly. Cache
  * miss falls back to the normal mode-decision path. */
 int phasm_fetch_replay_decision(uint16_t mb_x, uint16_t mb_y,
-                                PhasmStegoMbDecision* out_decision);
+                                PhasmStegoMbDecision* out_decision,
+                                void* stego);
 
 /* ---------------------------------------------------------------------
  * phasm_dual_recon_writeback (Phase C.8.2+)

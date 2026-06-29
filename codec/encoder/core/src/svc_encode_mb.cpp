@@ -137,7 +137,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
    * intra.md (consumer repo) for the audit. */
   {
     PhasmStegoPos phasm_pos;
-    phasm_pos.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos.frame_num     = phasm_stego_get_frame_num(pEncCtx->pPhasmStego);
     phasm_pos.mb_x          = (uint16_t)pCurMb->iMbX;
     phasm_pos.mb_y          = (uint16_t)pCurMb->iMbY;
     phasm_pos.partition_idx = 0;
@@ -182,7 +182,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
      * suffices. */
     {
       PhasmStegoPos phasm_pos_b;
-      phasm_pos_b.frame_num     = PhasmStegoGetFrameNum();
+      phasm_pos_b.frame_num     = phasm_stego_get_frame_num(pEncCtx->pPhasmStego);
       phasm_pos_b.mb_x          = (uint16_t)pCurMb->iMbX;
       phasm_pos_b.mb_y          = (uint16_t)pCurMb->iMbY;
       phasm_pos_b.partition_idx = 0;
@@ -471,7 +471,7 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
    * non-zero out — preserves nz count + CBP. */
   {
     PhasmStegoPos phasm_pos_e;
-    phasm_pos_e.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_e.frame_num     = phasm_stego_get_frame_num(pEncCtx->pPhasmStego);
     phasm_pos_e.mb_x          = (uint16_t)pCurMb->iMbX;
     phasm_pos_e.mb_y          = (uint16_t)pCurMb->iMbY;
     phasm_pos_e.partition_idx = 0;
@@ -670,7 +670,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
   {
     PhasmPostQuantCallback pq_cb = phasm_get_post_quant_callback();
     if (pq_cb) {
-      pq_cb(PhasmStegoGetFrameNum(),
+      pq_cb(phasm_stego_get_frame_num(phasm_stego),
             (uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
             pRes, 256,
             (uint8_t)pCurMb->uiCbp, 0, (int32_t)uiQp);
@@ -713,7 +713,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
    * pre-hook count, which is fine because we don't change zero-ness. */
   if (PhasmStegoGetEncPreEmit() != NULL) {
     PhasmStegoPos phasm_pos_f;
-    phasm_pos_f.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_f.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_f.mb_x          = (uint16_t)pCurMb->iMbX;
     phasm_pos_f.mb_y          = (uint16_t)pCurMb->iMbY;
     phasm_pos_f.partition_idx = 0;
@@ -883,7 +883,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * the recon. */
   if (PhasmStegoGetEncPreEmit() != NULL) {
     PhasmStegoPos phasm_pos_c;
-    phasm_pos_c.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_c.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_c.mb_x          = (uint16_t)pCurMb->iMbX;
     phasm_pos_c.mb_y          = (uint16_t)pCurMb->iMbY;
     phasm_pos_c.partition_idx = (uint8_t)(iUV - 1);
@@ -970,7 +970,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * (HOOK-C, Stage 5) and is unaffected by this hook. */
   if (PhasmStegoGetEncPreEmit() != NULL) {
     PhasmStegoPos phasm_pos_g;
-    phasm_pos_g.frame_num     = PhasmStegoGetFrameNum();
+    phasm_pos_g.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_g.mb_x          = (uint16_t)pCurMb->iMbX;
     phasm_pos_g.mb_y          = (uint16_t)pCurMb->iMbY;
     phasm_pos_g.partition_idx = (uint8_t)(iUV - 1);

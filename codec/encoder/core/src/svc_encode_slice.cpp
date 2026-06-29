@@ -62,13 +62,13 @@ typedef void (*PWelsSliceHeaderWriteFunc) (sWelsEncCtx* pCtx, SBitStringAux* pBs
  * the same MB boundary as phasm_emit_md_cost: after mode decision is
  * finalized and before residual emit. Fast-path bails immediately if
  * pass_mode != CAPTURE or no consumer registered. */
-static inline void phasm_capture_pcurmb (const SMB* pCurMb, const SMbCache* pMbCache) {
-  if (PhasmStegoGetPassMode() != PHASM_PASS_CAPTURE) return;
+static inline void phasm_capture_pcurmb (const SMB* pCurMb, const SMbCache* pMbCache, void* stego) {
+  if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_CAPTURE) return;
   if (PhasmStegoGetCaptureMbDecision() == nullptr) return;
 
   PhasmStegoMbDecision d;
   memset (&d, 0, sizeof (d));
-  d.frame_num  = PhasmStegoGetFrameNum();
+  d.frame_num  = phasm_stego_get_frame_num(stego);
   d.mb_x       = (uint16_t) pCurMb->iMbX;
   d.mb_y       = (uint16_t) pCurMb->iMbY;
   d.ui_mb_type = (uint16_t) (pCurMb->uiMbType & 0xFFFFu);
@@ -110,7 +110,7 @@ static inline void phasm_capture_pcurmb (const SMB* pCurMb, const SMbCache* pMbC
     d.chroma_pred_mode = (uint8_t) pCurMb->uiChromPredMode;
   }
 
-  phasm_emit_mb_decision (&d);
+  phasm_emit_mb_decision (&d, stego);
 }
 
 void UpdateNonZeroCountCache (SMB* pMb, SMbCache* pMbCache) {
@@ -837,10 +837,10 @@ TRY_REENCODING:
      * so consumers can filter pre-emit fires (which include candidate-
      * mode evaluations) down to wire-bound positions. */
     phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                        pCurMb->uiMbType, pCurMb->uiCbp);
+                        pCurMb->uiMbType, pCurMb->uiCbp, pEncCtx->pPhasmStego);
     /* phasm-stego #533.2: fire Pass-1 mode-decision capture for the
      * Pass-2 replay architecture. No-op unless pass_mode == CAPTURE. */
-    phasm_capture_pcurmb (pCurMb, pMbCache);
+    phasm_capture_pcurmb (pCurMb, pMbCache, pEncCtx->pPhasmStego);
 
     iEncReturn = pEncCtx->pFuncList->pfWelsSpatialWriteMbSyn (pEncCtx, pSlice, pCurMb);
     if (!pEncCtx->pSvcParam->iEntropyCodingModeFlag) {
@@ -919,9 +919,9 @@ TRY_REENCODING:
 
     /* phasm-stego A.5(j): see I-slice main path above. */
     phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                        pCurMb->uiMbType, pCurMb->uiCbp);
+                        pCurMb->uiMbType, pCurMb->uiCbp, pEncCtx->pPhasmStego);
     /* phasm-stego #533.2: Pass-1 capture (I-slice dynamic path). */
-    phasm_capture_pcurmb (pCurMb, pMbCache);
+    phasm_capture_pcurmb (pCurMb, pMbCache, pEncCtx->pPhasmStego);
 
     iEncReturn = pEncCtx->pFuncList->pfWelsSpatialWriteMbSyn (pEncCtx, pSlice, pCurMb);
     if (iEncReturn == ENC_RETURN_VLCOVERFLOWFOUND && (pCurMb->uiLumaQp < 50)) {
@@ -2140,9 +2140,9 @@ TRY_REENCODING:
     /* phasm-stego A.5(j): fire md_cost_capture with the winning mb_type
      * (P-slice main path). See svc_encode_slice.cpp I-slice site above. */
     phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                        pCurMb->uiMbType, pCurMb->uiCbp);
+                        pCurMb->uiMbType, pCurMb->uiCbp, pEncCtx->pPhasmStego);
     /* phasm-stego #533.2: Pass-1 capture (P-slice main path). */
-    phasm_capture_pcurmb (pCurMb, pMbCache);
+    phasm_capture_pcurmb (pCurMb, pMbCache, pEncCtx->pPhasmStego);
     /* P3.3b: advance the replay pointer for EVERY MB (inter + intra).
      * The Rust side sets the pointer to the start of the per-frame
      * flat buffer before encode_frame. Each MB consumes 256 entries
@@ -2187,7 +2187,7 @@ TRY_REENCODING:
       if (rc_cb) {
         int32_t bs_byte_pos = (int32_t)(pSlice->pSliceBsa->pCurBuf
                               - pSlice->pSliceBsa->pStartBuf);
-        rc_cb(PhasmStegoGetFrameNum(), (uint16_t)pCurMb->iMbY,
+        rc_cb(phasm_stego_get_frame_num(pEncCtx->pPhasmStego), (uint16_t)pCurMb->iMbY,
               bs_byte_pos, pSlice->pSliceBsa->iLeftBits);
       }
     }
@@ -2278,9 +2278,9 @@ TRY_REENCODING:
 
     /* phasm-stego A.5(j): see P-slice main path above. */
     phasm_emit_md_cost ((uint16_t)pCurMb->iMbX, (uint16_t)pCurMb->iMbY,
-                        pCurMb->uiMbType, pCurMb->uiCbp);
+                        pCurMb->uiMbType, pCurMb->uiCbp, pEncCtx->pPhasmStego);
     /* phasm-stego #533.2: Pass-1 capture (P-slice dynamic path). */
-    phasm_capture_pcurmb (pCurMb, pMbCache);
+    phasm_capture_pcurmb (pCurMb, pMbCache, pEncCtx->pPhasmStego);
 
     //step (6): begin to write bit stream; if the pSlice size is controlled, the writing may be skipped
 
