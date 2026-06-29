@@ -64,7 +64,7 @@ typedef void (*PWelsSliceHeaderWriteFunc) (sWelsEncCtx* pCtx, SBitStringAux* pBs
  * pass_mode != CAPTURE or no consumer registered. */
 static inline void phasm_capture_pcurmb (const SMB* pCurMb, const SMbCache* pMbCache, void* stego) {
   if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_CAPTURE) return;
-  if (PhasmStegoGetCaptureMbDecision() == nullptr) return;
+  if (phasm_stego_get_capture_mb_decision(stego) == nullptr) return;
 
   PhasmStegoMbDecision d;
   memset (&d, 0, sizeof (d));
@@ -541,7 +541,7 @@ void WelsIMbChromaEncode (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache)
    * block, re-run pfIDctFourT4 with the CLEAN coeffs stashed by
    * WelsEncRecUV (overwriting pCsCb/pCsCr with CLEAN), and mirror the
    * stego snapshot into pVisualRecPic via phasm_dual_recon_writeback. */
-  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+  const bool phasm_dr_active = (phasm_stego_get_enc_pre_emit(pEncCtx->pPhasmStego) != NULL)
                                && (pCurLayer->pVisualRecPic != NULL);
 
   //cb
@@ -647,7 +647,7 @@ void OutputPMbWithoutConstructCsRsNoCopy (sWelsEncCtx* pCtx, SDqLayer* pDq, SSli
      * WelsEncInterY (luma, C.8.6) and WelsEncRecUV (chroma, C.8.5) in
      * WelsPMbChromaEncode. Final state of pDecY/U/V is CLEAN; the stego
      * snapshots mirror into pVisualRecPic via phasm_dual_recon_writeback. */
-    const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+    const bool phasm_dr_active = (phasm_stego_get_enc_pre_emit(pCtx->pPhasmStego) != NULL)
                                  && (pDq->pVisualRecPic != NULL);
     uint8_t phasm_dr_pred_y[256], phasm_dr_pred_u[64], phasm_dr_pred_v[64];
     if (phasm_dr_active) {

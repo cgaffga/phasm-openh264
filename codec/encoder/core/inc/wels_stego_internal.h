@@ -105,6 +105,16 @@ void phasm_stego_state_set_frame_num(void* stego, uint32_t frame_num);
 void phasm_stego_state_set_pass_mode(void* stego, PhasmStegoPassMode mode);
 void phasm_stego_state_set_user_data(void* stego, void* user_data);
 
+/* B-full.3b (#895): per-instance ENCODER callbacks. `adopt_global_callbacks`
+ * mirrors the registered globals onto the instance (production consumer calls it
+ * after Encoder::new); the get-helpers read per-instance with global fallback so
+ * a clean producer (no adopt) reads its own NULL callbacks and no-ops. */
+void phasm_stego_state_adopt_global_callbacks(void* stego);
+PhasmStegoEncPreEmitFn         phasm_stego_get_enc_pre_emit(void* stego);
+PhasmStegoMdCostFn             phasm_stego_get_md_cost_capture(void* stego);
+PhasmStegoCaptureMbDecisionFn  phasm_stego_get_capture_mb_decision(void* stego);
+PhasmStegoReplayMbDecisionFn   phasm_stego_get_replay_mb_decision(void* stego);
+
 /* ---------------------------------------------------------------------
  * phasm_apply_coeff_hooks
  *

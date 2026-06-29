@@ -152,7 +152,7 @@ int16_t apply_suffix_lsb_coeff(int16_t level, int new_lsb_bit) {
 // -1 if no callback registered. Sets pos->domain before calling.
 int32_t dispatch_hook(PhasmStegoPos* pos, PhasmStegoDomain domain,
                       int32_t original_bit, void* stego) {
-  PhasmStegoEncPreEmitFn cb = PhasmStegoGetEncPreEmit();
+  PhasmStegoEncPreEmitFn cb = phasm_stego_get_enc_pre_emit(stego);
   if (cb == nullptr) return -1;
   pos->domain = (uint8_t)domain;
   return cb(pos, original_bit, phasm_stego_get_user_data(stego));
@@ -415,7 +415,7 @@ int phasm_apply_coeff_hooks(PhasmStegoPos* pos_template,
                             int16_t* level,
                             void* stego) {
   if (level == nullptr) return 0;
-  if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
+  if (phasm_stego_get_enc_pre_emit(stego) == nullptr) return 0;
 
   g_phasm_hook_single_fires_total.fetch_add(1, std::memory_order_relaxed);
   if (*level == 0) {
@@ -443,7 +443,7 @@ int phasm_apply_coeff_hooks_dual(PhasmStegoPos* pos_template,
                                  int16_t* level_b,
                                  void* stego) {
   if (level_a == nullptr || level_b == nullptr) return 0;
-  if (PhasmStegoGetEncPreEmit() == nullptr) return 0;
+  if (phasm_stego_get_enc_pre_emit(stego) == nullptr) return 0;
 
   // C.8.13(b) #455 — count total dual-write fires that pass the
   // null + callback-registered gates so the bail rates below are
@@ -527,7 +527,7 @@ int phasm_mvd_would_collide_with_pskip(int16_t mv_x, int16_t mv_y,
 void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
                         uint32_t internal_mb_type, uint8_t cbp,
                         void* stego) {
-  PhasmStegoMdCostFn cb = PhasmStegoGetMdCostCapture();
+  PhasmStegoMdCostFn cb = phasm_stego_get_md_cost_capture(stego);
   if (cb == nullptr) return;
 
   uint8_t klass;
@@ -562,7 +562,7 @@ void phasm_emit_md_cost(uint16_t mb_x, uint16_t mb_y,
 void phasm_emit_mb_decision(const PhasmStegoMbDecision* decision, void* stego) {
   if (decision == nullptr) return;
   if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_CAPTURE) return;
-  PhasmStegoCaptureMbDecisionFn cb = PhasmStegoGetCaptureMbDecision();
+  PhasmStegoCaptureMbDecisionFn cb = phasm_stego_get_capture_mb_decision(stego);
   if (cb == nullptr) return;
   cb(decision, phasm_stego_get_user_data(stego));
 }
@@ -572,7 +572,7 @@ int phasm_fetch_replay_decision(uint16_t mb_x, uint16_t mb_y,
                                 void* stego) {
   if (out_decision == nullptr) return 0;
   if (phasm_stego_get_pass_mode(stego) != PHASM_PASS_REPLAY) return 0;
-  PhasmStegoReplayMbDecisionFn cb = PhasmStegoGetReplayMbDecision();
+  PhasmStegoReplayMbDecisionFn cb = phasm_stego_get_replay_mb_decision(stego);
   if (cb == nullptr) return 0;
   return cb(phasm_stego_get_frame_num(stego), mb_x, mb_y, out_decision,
             phasm_stego_get_user_data(stego));
@@ -582,7 +582,7 @@ int phasm_apply_mvd_hooks(const PhasmMvHookCtx* ctx) {
   if (ctx == nullptr || ctx->mv_x_qpel == nullptr || ctx->mv_y_qpel == nullptr) {
     return 0;
   }
-  PhasmStegoEncPreEmitFn cb = PhasmStegoGetEncPreEmit();
+  PhasmStegoEncPreEmitFn cb = phasm_stego_get_enc_pre_emit(ctx->stego);
   if (cb == nullptr) return 0;
   void* user_data = phasm_stego_get_user_data(ctx->stego);
 
@@ -784,18 +784,32 @@ struct PhasmStegoState {
   uint16_t             last_mb_y;
   int                  use_wire_only_overrides;
   // B-full.3 (#895): per-encoder session state, migrated off the libcommon
-  // process-globals (g_phasm_frame_num / g_phasm_pass_mode / g_phasm_user_data)
-  // so concurrent encoder instances (parallel-GOP, 4b) each carry their own.
-  // `has_session_state` gates per-instance vs global-fallback reads: production
-  // wires these via phasm_stego_state_set_* after Encoder::new; the dormant
-  // decoder + whole-video test paths leave them 0 and the get-helpers below
-  // fall back to the libcommon globals. The callback FUNCTION POINTERS stay
-  // global (identical Rust trampolines across instances — race-free); only the
-  // per-session DATA varies per instance, so only the data lives here.
-  uint32_t             frame_num;
-  PhasmStegoPassMode   pass_mode;
-  void*                user_data;
-  int                  has_session_state;
+  // process-globals so concurrent encoder instances (parallel-GOP, 4b) each
+  // carry their own. `has_session_state` gates per-instance vs global-fallback
+  // reads: production wires these via phasm_stego_state_set_* +
+  // adopt_global_callbacks after Encoder::new; the dormant decoder + whole-video
+  // test paths leave them 0 and the get-helpers below fall back to the libcommon
+  // globals.
+  //
+  // B-full.3b (#895): the ENCODER callbacks live here too. (B-full.3 originally
+  // kept them global on a "race-free identical trampolines" argument — WRONG for
+  // 4b: clean producers run concurrently with the stego consumer, and a global
+  // enc_pre_emit/user_data would make a producer fire the CONSUMER's callbacks
+  // and corrupt both its clean cover and the consumer's DecisionCache (design
+  // §4, lines 381-389). So a producer marks itself a clean session
+  // (has_session_state=1, NULL callbacks) and reads per-instance NULL; the
+  // consumer adopts the registered callbacks. `dec_post_read` stays global
+  // (decoder, no encoder handle); `dual_recon_observe` stays global
+  // (libcommon-bound; producers skip it via the B-lite.2 thread-local
+  // dual_recon → NULL pVisualRecPic).
+  uint32_t                      frame_num;
+  PhasmStegoPassMode            pass_mode;
+  void*                         user_data;
+  PhasmStegoEncPreEmitFn        enc_pre_emit;
+  PhasmStegoMdCostFn            md_cost_capture;
+  PhasmStegoCaptureMbDecisionFn capture_mb_decision;
+  PhasmStegoReplayMbDecisionFn  replay_mb_decision;
+  int                           has_session_state;
 };
 
 extern "C" void* phasm_stego_state_create(void) {
@@ -832,6 +846,23 @@ extern "C" void phasm_stego_state_set_user_data(void* stego_v, void* user_data) 
   st->has_session_state = 1;
 }
 
+// B-full.3b (#895): mirror the just-registered global ENCODER callbacks onto
+// this instance. The production encode calls this after StegoSession::register
+// + Encoder::new, so the consumer's per-instance reads return the trampolines.
+// A clean producer (4b) does NOT call this → its callbacks stay NULL → its
+// stego/capture/replay hooks no-op even while the consumer has callbacks
+// registered globally. `dec_post_read` + `dual_recon_observe` are NOT adopted
+// (they stay global — decoder-only / libcommon-bound respectively).
+extern "C" void phasm_stego_state_adopt_global_callbacks(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  if (st == nullptr) return;
+  st->enc_pre_emit        = PhasmStegoGetEncPreEmit();
+  st->md_cost_capture     = PhasmStegoGetMdCostCapture();
+  st->capture_mb_decision = PhasmStegoGetCaptureMbDecision();
+  st->replay_mb_decision  = PhasmStegoGetReplayMbDecision();
+  st->has_session_state   = 1;
+}
+
 // Per-MB read-helpers: per-instance when the instance is session-active, else
 // the libcommon global (dormant decoder + whole-video test paths, where
 // has_session_state stays 0). NULL stego ⇒ global. The hot-path branch is a
@@ -853,6 +884,34 @@ extern "C" void* phasm_stego_get_user_data(void* stego_v) {
   PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
   return (st != nullptr && st->has_session_state) ? st->user_data
                                                   : PhasmStegoGetUserData();
+}
+
+// B-full.3b (#895): per-instance ENCODER callback accessors with the same
+// has_session_state-gated global fallback. A session-active producer reads its
+// own NULL callbacks (hooks no-op); the consumer reads its adopted trampolines;
+// unwired legacy/decoder paths fall back to the libcommon globals.
+extern "C" PhasmStegoEncPreEmitFn phasm_stego_get_enc_pre_emit(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->enc_pre_emit
+                                                  : PhasmStegoGetEncPreEmit();
+}
+
+extern "C" PhasmStegoMdCostFn phasm_stego_get_md_cost_capture(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->md_cost_capture
+                                                  : PhasmStegoGetMdCostCapture();
+}
+
+extern "C" PhasmStegoCaptureMbDecisionFn phasm_stego_get_capture_mb_decision(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->capture_mb_decision
+                                                  : PhasmStegoGetCaptureMbDecision();
+}
+
+extern "C" PhasmStegoReplayMbDecisionFn phasm_stego_get_replay_mb_decision(void* stego_v) {
+  PhasmStegoState* st = static_cast<PhasmStegoState*>(stego_v);
+  return (st != nullptr && st->has_session_state) ? st->replay_mb_decision
+                                                  : PhasmStegoGetReplayMbDecision();
 }
 
 /* B-full.2b (#895) — per-MB scratch reset, now keyed off the per-encoder

@@ -3694,7 +3694,7 @@ int32_t WelsEncoderEncodeExt (sWelsEncCtx* pCtx, SFrameBSInfo* pFbi, const SSour
      * decoder will see" reference. Non-stego encodes fall back to
      * pDecPic (pVisualDecPic content would be stale from a prior
      * frame since dual-recon writeback hadn't fired). */
-    fsnr                        = (PhasmStegoGetEncPreEmit() != NULL
+    fsnr                        = (phasm_stego_get_enc_pre_emit(pCtx->pPhasmStego) != NULL
                                    && pCtx->pVisualDecPic != NULL)
                                   ? pCtx->pVisualDecPic
                                   : pCtx->pDecPic;

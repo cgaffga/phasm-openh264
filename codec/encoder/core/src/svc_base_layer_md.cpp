@@ -85,7 +85,7 @@ static inline void phasm_apply_h_partition_hook(
     int32_t blockW,
     int32_t blockH,
     void* phasm_stego /* B-full.2b (#895): pEncCtx->pPhasmStego */) {
-  if (PhasmStegoGetEncPreEmit() == NULL) return;
+  if (phasm_stego_get_enc_pre_emit(phasm_stego) == NULL) return;
   uint8_t addr = g_kuiSmb4AddrIn256[iIdx];
   int32_t px = (int32_t)(addr & 0x0f);
   int32_t py = (int32_t)(addr >> 4);
@@ -1700,7 +1700,7 @@ void WelsMdInterMbRefinement (sWelsEncCtx* pEncCtx, SWelsMD* pWelsMd, SMB* pCurM
      * non-zero MVD component (X then Y) and PHASM_DOMAIN_MVD_SUFFIX_LSB
      * when |MVD| >= 9. Overrides only commit if the result doesn't
      * collide with PredSkipMv. */
-    if (PhasmStegoGetEncPreEmit() != NULL) {
+    if (phasm_stego_get_enc_pre_emit(pEncCtx->pPhasmStego) != NULL) {
       SMVUnitXY phasm_pred_skip;
       PredSkipMv(pMbCache, &phasm_pred_skip);
       PhasmMvHookCtx phasm_h1_ctx;

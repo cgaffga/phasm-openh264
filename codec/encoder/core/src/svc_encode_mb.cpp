@@ -94,7 +94,7 @@ void WelsEncRecI16x16Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache) {
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_aDctT4Dc, 16, 16)
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes,    256, 16)
   ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_recon,   256, 16)
-  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+  const bool phasm_dr_active = (phasm_stego_get_enc_pre_emit(pEncCtx->pPhasmStego) != NULL)
                                && (pEncCtx->pCurDqLayer->pVisualRecPic != NULL);
   bool phasm_dr_dirty = false;
 
@@ -445,7 +445,7 @@ void WelsEncRecI4x4Y (sWelsEncCtx* pEncCtx, SMB* pCurMb, SMbCache* pMbCache, uin
    * extra work. */
   ENFORCE_STACK_ALIGN_1D (int16_t, phasm_dr_clean_pRes4x4, 16, 16)
   ENFORCE_STACK_ALIGN_1D (uint8_t, phasm_dr_stego_i4x4,    16, 4)
-  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL)
+  const bool phasm_dr_active = (phasm_stego_get_enc_pre_emit(pEncCtx->pPhasmStego) != NULL)
                                && (pCurDqLayer->pVisualRecPic != NULL);
   bool phasm_dr_dirty = false;
 
@@ -681,7 +681,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
    * (256 int16_t = 16 4x4 sub-blocks). This is in QUANT domain; the
    * stash recompute below will mirror suppression + dequant after the
    * live path runs them. */
-  const bool phasm_dr_active_y = (PhasmStegoGetEncPreEmit() != NULL);
+  const bool phasm_dr_active_y = (phasm_stego_get_enc_pre_emit(phasm_stego) != NULL);
   int16_t phasm_dr_clean_luma[256];
   if (phasm_dr_active_y) {
     memcpy(phasm_dr_clean_luma, pRes, sizeof(int16_t) * 256);
@@ -711,7 +711,7 @@ void WelsEncInterY (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCache
    * iSingleCtrMb is already computed above and stable for our
    * non-zero-preserving hook. Suppression below runs against the
    * pre-hook count, which is fine because we don't change zero-ness. */
-  if (PhasmStegoGetEncPreEmit() != NULL) {
+  if (phasm_stego_get_enc_pre_emit(phasm_stego) != NULL) {
     PhasmStegoPos phasm_pos_f;
     phasm_pos_f.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_f.mb_x          = (uint16_t)pCurMb->iMbX;
@@ -827,7 +827,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * svc_encode_slice.cpp can recompute a clean reconstruction alongside
    * the live stego one. Gated on a stego session being registered so
    * non-stego encodes stay byte-identical to upstream. */
-  const bool phasm_dr_active = (PhasmStegoGetEncPreEmit() != NULL);
+  const bool phasm_dr_active = (phasm_stego_get_enc_pre_emit(phasm_stego) != NULL);
   int16_t phasm_dr_clean_aDct2x2[4]   = {0, 0, 0, 0};
   int16_t phasm_dr_clean_acres[64];
   /* C.9.1 Path A v2 (#449) per-plane chroma dirty accumulator. OR'd from
@@ -881,7 +881,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * uiNoneZeroCountMbDc > 0). Sign-flips preserve |level| so the
    * dequant + re-injection chain produces a symmetric perturbation in
    * the recon. */
-  if (PhasmStegoGetEncPreEmit() != NULL) {
+  if (phasm_stego_get_enc_pre_emit(phasm_stego) != NULL) {
     PhasmStegoPos phasm_pos_c;
     phasm_pos_c.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_c.mb_x          = (uint16_t)pCurMb->iMbX;
@@ -968,7 +968,7 @@ void    WelsEncRecUV (SWelsFuncPtrList* pFuncList, SMB* pCurMb, SMbCache* pMbCac
    * suppression decision below uses the pre-hook count which stays
    * stable for our contract. Chroma DC is a separate path
    * (HOOK-C, Stage 5) and is unaffected by this hook. */
-  if (PhasmStegoGetEncPreEmit() != NULL) {
+  if (phasm_stego_get_enc_pre_emit(phasm_stego) != NULL) {
     PhasmStegoPos phasm_pos_g;
     phasm_pos_g.frame_num     = phasm_stego_get_frame_num(phasm_stego);
     phasm_pos_g.mb_x          = (uint16_t)pCurMb->iMbX;
@@ -1080,6 +1080,12 @@ void    WelsRecPskip (SDqLayer* pCurLayer, SWelsFuncPtrList* pFuncList, SMB* pCu
    * the same MB offset. Pass the same pSkipMb pointer as both clean +
    * stego so the observe callback fires with identical buffers (Pskip
    * has no perturbation by construction). */
+  // B-full.3b (#895): deliberately the GLOBAL enc_pre_emit read — WelsRecPskip
+  // carries no encoder handle (SDqLayer/SMB only), and this gate is already
+  // producer-safe via the `&& pVisualRecPic != NULL` clause: a clean producer
+  // has dual_recon disabled (B-lite.2 thread-local) → pVisualRecPic == NULL → the
+  // block is skipped regardless of the global callback. Migrate if WelsRecPskip
+  // ever gains a stego carrier.
   if (PhasmStegoGetEncPreEmit() != NULL && pCurLayer->pVisualRecPic != NULL) {
     int32_t* pStrideAll = pCurLayer->iCsStride;
     const ptrdiff_t y_off  = pCsMb[0] - pCurLayer->pCsData[0];
