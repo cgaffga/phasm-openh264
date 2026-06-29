@@ -35,6 +35,7 @@
 #include "utils.h"
 #include "picture_handle.h"
 #include "wels_stego.h"  // phasm P3.3a: phasm_set_dec_pic_y
+#include "wels_stego_internal.h"  // B-full.4 (#895): phasm_stego_get_enc_pre_emit (per-instance gate)
 namespace WelsEnc {
 
 #define STR_ROOM 1
@@ -391,8 +392,17 @@ bool WelsUpdateRefList (sWelsEncCtx* pCtx) {
                                 pCtx->pFuncList->sExpandPicFunc.pfExpandLumaPicture, pCtx->pFuncList->sExpandPicFunc.pfExpandChromaPicture);
 
     // P3.3a: capture pDecPic Y plane for Rust-side DPB correction.
-    phasm_set_dec_pic_y(pCtx->pDecPic->pData[0],
-                        pCtx->pDecPic->iLineSize[0]);
+    // B-full.4 (#895): gate on stego-active (per-instance enc_pre_emit) so a 4b
+    // clean producer doesn't clobber the stego consumer's dec_pic_y in the
+    // libcommon global g_phasm_dec_pic_y_ptr. This setter is otherwise
+    // UNCONDITIONAL (every encode), unlike the clean_pres/dirty/slice_override
+    // setters which already sit inside enc_pre_emit/dr_active blocks. The stego
+    // consumer is the sole reader (via the handle-ignoring shim), so gating the
+    // WRITE makes it single-writer → no race. Byte-identical: a clean encode
+    // never reads dec_pic_y (DPB correction is stego-only).
+    if (phasm_stego_get_enc_pre_emit(pCtx->pPhasmStego) != NULL)
+      phasm_set_dec_pic_y(pCtx->pDecPic->pData[0],
+                          pCtx->pDecPic->iLineSize[0]);
 
     // move picture in list
     pCtx->pDecPic->uiTemporalId = kuiTid;
